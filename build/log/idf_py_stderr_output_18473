@@ -1,0 +1,18 @@
+CMake Error at /home/csubuntu/Desktop/esp32/esp-idf/tools/cmake/component.cmake:490 (add_library):
+  Cannot find source file:
+
+    /home/csubuntu/Desktop/work/esp32/code/ESP32/esp_wifi_collar/main/scan.c
+
+  Tried extensions .c .C .c++ .cc .cpp .cxx .cu .m .M .mm .h .hh .h++ .hm
+  .hpp .hxx .in .txx
+Call Stack (most recent call first):
+  main/CMakeLists.txt:1 (idf_component_register)
+
+
+CMake Error at /home/csubuntu/Desktop/esp32/esp-idf/tools/cmake/component.cmake:490 (add_library):
+  No SOURCES given to target: __idf_main
+Call Stack (most recent call first):
+  main/CMakeLists.txt:1 (idf_component_register)
+
+
+CMake Generate step failed.  Build files cannot be regenerated correctly.
