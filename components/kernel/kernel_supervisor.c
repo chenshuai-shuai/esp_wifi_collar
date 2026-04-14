@@ -1,3 +1,5 @@
+#include <inttypes.h>
+
 #include "kernel/kernel_supervisor.h"
 
 #include "freertos/FreeRTOS.h"
@@ -9,7 +11,7 @@
 #include "kernel/kernel_msgbus.h"
 #include "kernel/kernel_trace.h"
 
-#define KERNEL_SUPERVISOR_STACK_WORDS  1536
+#define KERNEL_SUPERVISOR_STACK_WORDS  3072
 #define KERNEL_SUPERVISOR_PRIORITY     4
 #define KERNEL_SUPERVISOR_CORE         tskNO_AFFINITY
 #define KERNEL_SUPERVISOR_PERIOD_MS    5000
@@ -27,8 +29,10 @@ static void kernel_supervisor_task(void *arg)
     for (;;) {
         const uint32_t free_heap = esp_get_free_heap_size();
         const uint32_t min_heap = xPortGetMinimumEverFreeHeapSize();
+        const uint32_t stack_words_min = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
 
-        ESP_LOGI(TAG, "heap=%lu min_heap=%lu", (unsigned long)free_heap, (unsigned long)min_heap);
+        ESP_LOGD(TAG, "heap=%" PRIu32 " min_heap=%" PRIu32 " stack_words_min=%" PRIu32,
+                 free_heap, min_heap, stack_words_min);
         kernel_trace_counter("free_heap", free_heap);
 
         const kernel_msg_t msg = {

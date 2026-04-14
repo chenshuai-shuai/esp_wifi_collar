@@ -7,6 +7,7 @@
 #include "kernel/kernel_msgbus.h"
 #include "kernel/kernel_trace.h"
 #include "kernel/kernel_workqueue.h"
+#include "services/wifi_service.h"
 
 #define SERVICE_MANAGER_STACK_WORDS    2048
 #define SERVICE_MANAGER_PRIORITY       9
@@ -18,10 +19,34 @@ static StaticTask_t s_service_tcb;
 static StackType_t s_service_stack[SERVICE_MANAGER_STACK_WORDS];
 static bool s_service_started;
 
+static const char *wifi_state_to_string(kernel_wifi_state_t state)
+{
+    switch (state) {
+    case KERNEL_WIFI_STATE_IDLE:
+        return "idle";
+    case KERNEL_WIFI_STATE_STARTING:
+        return "starting";
+    case KERNEL_WIFI_STATE_PROVISIONING:
+        return "provisioning";
+    case KERNEL_WIFI_STATE_CONNECTING:
+        return "connecting";
+    case KERNEL_WIFI_STATE_CONNECTED:
+        return "connected";
+    case KERNEL_WIFI_STATE_GOT_IP:
+        return "got_ip";
+    case KERNEL_WIFI_STATE_DISCONNECTED:
+        return "disconnected";
+    case KERNEL_WIFI_STATE_FAILED:
+        return "failed";
+    default:
+        return "unknown";
+    }
+}
+
 static void service_housekeeping(void *ctx)
 {
     (void)ctx;
-    ESP_LOGI(TAG, "Deferred housekeeping finished");
+    ESP_LOGD(TAG, "Deferred housekeeping finished");
 }
 
 static void service_manager_task(void *arg)
@@ -41,11 +66,11 @@ static void service_manager_task(void *arg)
             break;
 
         case KERNEL_TOPIC_RT_CYCLE:
-            ESP_LOGI(TAG, "RT plane heartbeat cycles=%lu", (unsigned long)msg.value);
+            ESP_LOGD(TAG, "RT plane heartbeat cycles=%lu", (unsigned long)msg.value);
             break;
 
         case KERNEL_TOPIC_APP_HEARTBEAT:
-            ESP_LOGI(TAG, "App heartbeat seq=%lu", (unsigned long)msg.value);
+            ESP_LOGD(TAG, "App heartbeat seq=%lu", (unsigned long)msg.value);
             if ((msg.value % 5U) == 0U) {
                 const kernel_work_item_t item = {
                     .fn = service_housekeeping,
@@ -57,6 +82,10 @@ static void service_manager_task(void *arg)
 
         case KERNEL_TOPIC_SERVICE_HEALTH:
             kernel_trace_counter("service_health_heap", msg.value);
+            break;
+
+        case KERNEL_TOPIC_WIFI_STATE:
+            ESP_LOGI(TAG, "Wi-Fi state=%s", wifi_state_to_string((kernel_wifi_state_t)msg.value));
             break;
 
         default:
@@ -85,6 +114,11 @@ esp_err_t service_manager_init(void)
 
     if (task_handle == NULL) {
         return ESP_FAIL;
+    }
+
+    esp_err_t ret = wifi_service_start();
+    if (ret != ESP_OK) {
+        return ret;
     }
 
     s_service_started = true;

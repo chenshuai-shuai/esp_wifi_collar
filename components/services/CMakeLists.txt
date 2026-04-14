@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "service_manager.c"
+    SRCS "service_manager.c" "wifi_service.c" "dns_server.c"
     INCLUDE_DIRS "include"
-    REQUIRES kernel freertos esp_timer log
+    REQUIRES kernel freertos esp_timer log esp_event esp_netif esp_wifi lwip esp_http_server nvs_flash
 )

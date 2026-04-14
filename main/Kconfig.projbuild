@@ -1,9 +1,32 @@
 menu "Collar Configuration"
 
+    choice COLLAR_LOG_PROFILE
+        prompt "Log Profile"
+        default COLLAR_LOG_PROFILE_NORMAL
+        help
+            Select the default runtime log policy applied at boot.
+
+        config COLLAR_LOG_PROFILE_QUIET
+            bool "Quiet"
+            help
+                Show only high-value lifecycle, warning, and error logs.
+
+        config COLLAR_LOG_PROFILE_NORMAL
+            bool "Normal"
+            help
+                Show major subsystem logs while hiding periodic heartbeat noise.
+
+        config COLLAR_LOG_PROFILE_VERBOSE
+            bool "Verbose"
+            help
+                Enable detailed debug logs for heartbeat and supervisor activity.
+    endchoice
+
     config COLLAR_ENABLE_VERBOSE_BOOT_LOG
         bool "Enable verbose boot trace"
         default y
         help
             Keep the bootstrap log enabled while bringing up the ESP32-C3 real-time
             dialogue controller. Disable it later if you want quieter production logs.
+
 endmenu

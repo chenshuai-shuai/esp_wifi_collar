@@ -33,6 +33,18 @@ Flash with:
 idf.py -p PORT flash monitor
 ```
 
+For the shared `nRF + ESP UART0` flashing flow, use:
+
+```bash
+python3 tools/nrf_shared_uart_flash.py --port /dev/ttyUSB0 probe
+python3 tools/nrf_shared_uart_flash.py --port /dev/ttyUSB0 flash
+python3 tools/nrf_shared_uart_flash.py --port /dev/ttyUSB0 flash --monitor
+python3 tools/nrf_shared_uart_flash.py --port /dev/ttyUSB0 send NRF:ESP_DL
+```
+
+This helper sends `NRF:ESP_DL` and `NRF:ESP_BOOT` around the ESP32-C3 flashing step, so the
+PC still flashes the ESP directly over the shared UART while the nRF only controls boot mode.
+
 ## Notes
 
 - The runtime scaffold uses static task and queue allocation where practical.
@@ -40,3 +52,4 @@ idf.py -p PORT flash monitor
   single-core ESP32-C3 while remaining portable across other ESP-IDF targets.
 - The original Wi-Fi scan example code has been removed; README and menuconfig entries
   now reflect the collar controller scaffold instead of the upstream example.
+- `ESP32-C3-WROOM-02U-N4` uses 4 MB flash, and this project now emits flash headers for 4 MB.

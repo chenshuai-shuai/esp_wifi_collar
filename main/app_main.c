@@ -1,7 +1,12 @@
+#include <inttypes.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_app_desc.h"
 #include "esp_err.h"
+#include "esp_chip_info.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
@@ -9,9 +14,66 @@
 #include "bsp/bsp_board.h"
 #include "kernel/kernel.h"
 #include "kernel/kernel_msgbus.h"
+#include "platform_hal/log_control.h"
 #include "services/service_manager.h"
 
 static const char *TAG = "main";
+
+static const char *reset_reason_to_string(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_UNKNOWN:
+        return "unknown";
+    case ESP_RST_POWERON:
+        return "power_on";
+    case ESP_RST_EXT:
+        return "external";
+    case ESP_RST_SW:
+        return "software";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+        return "interrupt_watchdog";
+    case ESP_RST_TASK_WDT:
+        return "task_watchdog";
+    case ESP_RST_WDT:
+        return "other_watchdog";
+    case ESP_RST_DEEPSLEEP:
+        return "deep_sleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout";
+    case ESP_RST_SDIO:
+        return "sdio";
+    case ESP_RST_USB:
+        return "usb";
+    case ESP_RST_JTAG:
+        return "jtag";
+    case ESP_RST_EFUSE:
+        return "efuse";
+    case ESP_RST_PWR_GLITCH:
+        return "power_glitch";
+    case ESP_RST_CPU_LOCKUP:
+        return "cpu_lockup";
+    default:
+        return "unmapped";
+    }
+}
+
+static void log_boot_identity(void)
+{
+    esp_chip_info_t chip = {0};
+    const esp_app_desc_t *app_desc = esp_app_get_description();
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    esp_chip_info(&chip);
+
+    ESP_LOGI(TAG, "Boot start: project=%s version=%s idf=%s",
+             app_desc->project_name, app_desc->version, esp_get_idf_version());
+    ESP_LOGI(TAG, "Chip info: model=%s cores=%d revision=%d features=0x%" PRIx32,
+             CONFIG_IDF_TARGET, chip.cores, chip.revision, chip.features);
+    ESP_LOGI(TAG, "Reset reason: %s (%d)",
+             reset_reason_to_string(reset_reason), reset_reason);
+}
 
 static void init_nvs(void)
 {
@@ -25,6 +87,8 @@ static void init_nvs(void)
 
 void app_main(void)
 {
+    log_control_apply();
+    log_boot_identity();
     init_nvs();
 
     ESP_ERROR_CHECK(bsp_board_init());

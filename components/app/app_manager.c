@@ -40,7 +40,7 @@ static void collar_app_task(void *arg)
             kernel_trace_counter("app_heartbeat", heartbeat_seq);
         }
 
-        ESP_LOGI(TAG, "Collar app alive seq=%lu", (unsigned long)heartbeat_seq);
+        ESP_LOGD(TAG, "Collar app alive seq=%lu", (unsigned long)heartbeat_seq);
         vTaskDelay(pdMS_TO_TICKS(APP_HEARTBEAT_PERIOD_MS));
     }
 }
