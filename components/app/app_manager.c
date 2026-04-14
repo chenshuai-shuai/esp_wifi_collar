@@ -10,7 +10,7 @@
 
 #define APP_MANAGER_STACK_WORDS        2048
 #define APP_MANAGER_PRIORITY           8
-#define APP_MANAGER_CORE               1
+#define APP_MANAGER_CORE               tskNO_AFFINITY
 #define APP_HEARTBEAT_PERIOD_MS        1000
 
 static const char *TAG = "app_mgr";

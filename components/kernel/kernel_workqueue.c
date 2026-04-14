@@ -8,7 +8,7 @@
 #define KERNEL_WORKQUEUE_LENGTH        16
 #define KERNEL_WORKER_STACK_WORDS      2048
 #define KERNEL_WORKER_PRIORITY         10
-#define KERNEL_WORKER_CORE             1
+#define KERNEL_WORKER_CORE             tskNO_AFFINITY
 
 static StaticQueue_t s_workqueue_tcb;
 static uint8_t s_workqueue_storage[KERNEL_WORKQUEUE_LENGTH * sizeof(kernel_work_item_t)];

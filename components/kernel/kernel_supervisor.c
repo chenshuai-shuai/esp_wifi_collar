@@ -11,7 +11,7 @@
 
 #define KERNEL_SUPERVISOR_STACK_WORDS  1536
 #define KERNEL_SUPERVISOR_PRIORITY     4
-#define KERNEL_SUPERVISOR_CORE         1
+#define KERNEL_SUPERVISOR_CORE         tskNO_AFFINITY
 #define KERNEL_SUPERVISOR_PERIOD_MS    5000
 
 static const char *TAG = "supervisor";

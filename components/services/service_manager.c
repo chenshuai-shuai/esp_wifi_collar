@@ -10,7 +10,7 @@
 
 #define SERVICE_MANAGER_STACK_WORDS    2048
 #define SERVICE_MANAGER_PRIORITY       9
-#define SERVICE_MANAGER_CORE           1
+#define SERVICE_MANAGER_CORE           tskNO_AFFINITY
 
 static const char *TAG = "service_mgr";
 
