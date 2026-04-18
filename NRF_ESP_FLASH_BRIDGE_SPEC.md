@@ -121,3 +121,29 @@ The interface is considered aligned when all of the following are true:
 3. ESP flashing completes through the shared UART
 4. After flashing, `NRF:ESP_BOOT` makes ESP reboot normally from flash
 5. Optional: serial monitor can observe ESP logs on the same shared UART
+
+## Runtime Application Command Coexistence
+
+After the ESP boots normally from flash, the same shared UART0 link may also carry
+application-layer commands from the nRF side to the ESP application.
+
+Current status:
+- the ESP application-side UART control module has been implemented
+- it is not auto-started in the current firmware
+- later enablement should be explicit, so it does not interfere with unrelated application flows
+
+Current ESP-supported runtime command:
+
+- `ESP:WIFI_REPROVISION`
+  - Clear saved Wi-Fi credentials
+  - Disconnect current STA session
+  - Re-enter SoftAP provisioning mode
+
+Expected ESP response lines:
+
+- `OK:WIFI_REPROVISION`
+- `ERR:WIFI_REPROVISION:<esp_err_name>`
+
+Important:
+- these runtime commands are separate from the nRF boot-control commands `NRF:ESP_*`
+- UART traffic may contain normal ESP logs between command and response lines

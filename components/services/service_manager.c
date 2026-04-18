@@ -7,6 +7,8 @@
 #include "kernel/kernel_msgbus.h"
 #include "kernel/kernel_trace.h"
 #include "kernel/kernel_workqueue.h"
+#include "services/cloud_service.h"
+#include "services/conversation_service.h"
 #include "services/wifi_service.h"
 
 #define SERVICE_MANAGER_STACK_WORDS    2048
@@ -82,10 +84,15 @@ static void service_manager_task(void *arg)
 
         case KERNEL_TOPIC_SERVICE_HEALTH:
             kernel_trace_counter("service_health_heap", msg.value);
+            wifi_service_log_status();
+            cloud_service_log_status();
+            conversation_service_log_status();
             break;
 
         case KERNEL_TOPIC_WIFI_STATE:
             ESP_LOGI(TAG, "Wi-Fi state=%s", wifi_state_to_string((kernel_wifi_state_t)msg.value));
+            cloud_service_handle_wifi_state((kernel_wifi_state_t)msg.value);
+            conversation_service_handle_wifi_state((kernel_wifi_state_t)msg.value);
             break;
 
         default:
@@ -117,6 +124,16 @@ esp_err_t service_manager_init(void)
     }
 
     esp_err_t ret = wifi_service_start();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = cloud_service_start();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = conversation_service_start();
     if (ret != ESP_OK) {
         return ret;
     }

@@ -16,6 +16,8 @@ void log_control_apply(void)
     set_level("hal", ESP_LOG_INFO);
     set_level("kernel", ESP_LOG_INFO);
     set_level("wifi_svc", ESP_LOG_INFO);
+    set_level("cloud_svc", ESP_LOG_INFO);
+    set_level("conv_svc", ESP_LOG_INFO);
     set_level("service_mgr", ESP_LOG_INFO);
     set_level("app_mgr", ESP_LOG_WARN);
     set_level("supervisor", ESP_LOG_WARN);
@@ -28,6 +30,8 @@ void log_control_apply(void)
     esp_log_level_set("*", ESP_LOG_INFO);
     set_level("app_mgr", ESP_LOG_DEBUG);
     set_level("service_mgr", ESP_LOG_DEBUG);
+    set_level("cloud_svc", ESP_LOG_INFO);
+    set_level("conv_svc", ESP_LOG_INFO);
     set_level("supervisor", ESP_LOG_DEBUG);
     set_level("trace", ESP_LOG_DEBUG);
     set_level("httpd", ESP_LOG_ERROR);
@@ -41,6 +45,8 @@ void log_control_apply(void)
     set_level("hal", ESP_LOG_INFO);
     set_level("kernel", ESP_LOG_INFO);
     set_level("wifi_svc", ESP_LOG_INFO);
+    set_level("cloud_svc", ESP_LOG_INFO);
+    set_level("conv_svc", ESP_LOG_INFO);
     set_level("service_mgr", ESP_LOG_INFO);
     set_level("app_mgr", ESP_LOG_WARN);
     set_level("supervisor", ESP_LOG_INFO);

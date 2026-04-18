@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package traini;
+
+option java_package = "traini";
+option java_outer_classname = "TrainiProto";
+
+message Empty {}
+
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+service ConversationService {
+  rpc StreamConversation(stream AudioChunk) returns (stream ConversationEvent);
+  rpc EndConversation(EndConversationRequest) returns (SessionSummary);
+}
+
+message AudioChunk {
+  bytes audio_data = 1;
+  AudioFormat format = 2;
+  int64 sequence_number = 3;
+  Timestamp timestamp = 4;
+}
+
+message AudioFormat {
+  int32 sample_rate = 1;
+  int32 channels = 2;
+  int32 bit_depth = 3;
+  string encoding = 4;
+}
+
+message ConversationEvent {
+  oneof event {
+    AudioOutput audio_output = 1;
+    AudioComplete audio_complete = 2;
+    ErrorEvent error = 100;
+  }
+}
+
+message AudioOutput {
+  bytes audio_data = 1;
+  int64 sequence_number = 2;
+}
+
+message AudioComplete {
+  int64 total_chunks = 1;
+}
+
+message ErrorEvent {
+  string code = 1;
+  string message = 2;
+}
+
+message EndConversationRequest {
+  string session_id = 1;
+}
+
+message SessionSummary {
+  string session_id = 1;
+}

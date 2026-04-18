@@ -41,6 +41,8 @@
 
 static const char *TAG = "wifi_svc";
 
+static const char *wifi_service_state_string(void);
+
 static const char s_portal_page[] =
 "<!doctype html>"
 "<html><head><meta charset='utf-8'>"
@@ -118,6 +120,40 @@ static esp_err_t wifi_service_publish_state(kernel_wifi_state_t state)
     };
 
     return kernel_msgbus_publish(&msg, pdMS_TO_TICKS(10));
+}
+
+void wifi_service_log_status(void)
+{
+    wifi_ap_record_t ap_info = {0};
+    esp_err_t ap_info_ret = ESP_FAIL;
+    const char *state = wifi_service_state_string();
+    const char *link_ready = s_wifi.sta_got_ip ? "yes" : "no";
+    const char *portal = s_wifi.portal_active ? "on" : "off";
+    const char *ssid = s_wifi.sta_ssid[0] != '\0' ? s_wifi.sta_ssid : "-";
+    const char *ip = s_wifi.sta_ip[0] != '\0' ? s_wifi.sta_ip : "-";
+    int rssi = 0;
+
+    if (!s_wifi.initialized) {
+        ESP_LOGI(TAG, "Wi-Fi status: initialized=no");
+        return;
+    }
+
+    if (s_wifi.sta_connected || s_wifi.sta_got_ip) {
+        ap_info_ret = esp_wifi_sta_get_ap_info(&ap_info);
+        if (ap_info_ret == ESP_OK) {
+            rssi = ap_info.rssi;
+        }
+    }
+
+    if (ap_info_ret == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s rssi=%d retries=%u",
+                 state, link_ready, portal, ssid, ip, rssi, (unsigned int)s_wifi.retry_count);
+    } else {
+        ESP_LOGI(TAG,
+                 "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s retries=%u",
+                 state, link_ready, portal, ssid, ip, (unsigned int)s_wifi.retry_count);
+    }
 }
 
 static void wifi_service_set_error(const char *error)
@@ -212,6 +248,42 @@ static esp_err_t wifi_service_load_credentials(void)
     return ret;
 }
 
+static esp_err_t wifi_service_clear_credentials(void)
+{
+    nvs_handle_t handle;
+    esp_err_t ret = nvs_open(WIFI_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = ESP_OK;
+    } else if (ret == ESP_OK) {
+        esp_err_t erase_ssid_ret = nvs_erase_key(handle, WIFI_KEY_SSID);
+        esp_err_t erase_password_ret = nvs_erase_key(handle, WIFI_KEY_PASSWORD);
+
+        if (erase_ssid_ret != ESP_OK && erase_ssid_ret != ESP_ERR_NVS_NOT_FOUND) {
+            ret = erase_ssid_ret;
+        }
+        if (ret == ESP_OK && erase_password_ret != ESP_OK && erase_password_ret != ESP_ERR_NVS_NOT_FOUND) {
+            ret = erase_password_ret;
+        }
+        if (ret == ESP_OK) {
+            ret = nvs_commit(handle);
+        }
+        nvs_close(handle);
+    }
+
+    if (ret == ESP_OK) {
+        s_wifi.has_credentials = false;
+        s_wifi.sta_ssid[0] = '\0';
+        s_wifi.sta_password[0] = '\0';
+        s_wifi.sta_connected = false;
+        s_wifi.sta_got_ip = false;
+        s_wifi.sta_ip[0] = '\0';
+        s_wifi.retry_count = 0;
+        wifi_service_set_error("");
+    }
+
+    return ret;
+}
+
 static esp_err_t wifi_service_save_credentials(const char *ssid, const char *password)
 {
     nvs_handle_t handle;
@@ -275,6 +347,35 @@ static void wifi_service_apply_low_power_profile(wifi_mode_t mode)
         ESP_LOGI(TAG, "Wi-Fi TX power limited to %.2f dBm for provisioning",
                  WIFI_PORTAL_TX_POWER_QUARTER_DBM / 4.0f);
     }
+}
+
+esp_err_t wifi_service_request_reprovision(void)
+{
+    if (!s_wifi.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = wifi_service_clear_credentials();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    esp_err_t disconnect_ret = esp_wifi_disconnect();
+    if (disconnect_ret != ESP_OK &&
+        disconnect_ret != ESP_ERR_WIFI_NOT_INIT &&
+        disconnect_ret != ESP_ERR_WIFI_NOT_STARTED &&
+        disconnect_ret != ESP_ERR_WIFI_NOT_CONNECT) {
+        ESP_LOGW(TAG, "esp_wifi_disconnect failed during reprovision: %s", esp_err_to_name(disconnect_ret));
+    }
+
+    ret = wifi_service_start_portal();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Entered provisioning mode on request");
+    (void)wifi_service_publish_state(KERNEL_WIFI_STATE_PROVISIONING);
+    return ESP_OK;
 }
 
 static void wifi_service_update_ap_identity(void)

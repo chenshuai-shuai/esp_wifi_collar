@@ -29,4 +29,110 @@ menu "Collar Configuration"
             Keep the bootstrap log enabled while bringing up the ESP32-C3 real-time
             dialogue controller. Disable it later if you want quieter production logs.
 
+    config COLLAR_CLOUD_PROBE_ENABLE
+        bool "Enable cloud reachability probe"
+        default y
+        help
+            Start a lightweight cloud probe service that attempts DNS resolution and
+            TCP connectivity checks once Wi-Fi is ready.
+
+    config COLLAR_CLOUD_HOST
+        string "Cloud server host"
+        default ""
+        help
+            Hostname or IP address of the cloud endpoint that the ESP should probe.
+            Leave empty to keep the cloud probe idle.
+
+    config COLLAR_CLOUD_PORT
+        int "Cloud server port"
+        range 1 65535
+        default 50051
+        help
+            Target TCP port used by the cloud endpoint. Use your gRPC service port here.
+
+    config COLLAR_CLOUD_PROBE_INTERVAL_SEC
+        int "Cloud probe interval (seconds)"
+        range 3 300
+        default 10
+        help
+            How often to retry the cloud reachability probe after Wi-Fi becomes ready.
+
+    config COLLAR_CLOUD_CONNECT_TIMEOUT_MS
+        int "Cloud connect timeout (ms)"
+        range 500 20000
+        default 3000
+        help
+            TCP connect timeout used by the cloud reachability probe.
+
+    config COLLAR_CONVERSATION_ENABLE
+        bool "Enable conversation service skeleton"
+        default y
+        help
+            Track readiness for the Traini real-time conversation service derived from
+            the Android BLE app implementation.
+
+    config COLLAR_CONVERSATION_HOST
+        string "Conversation gRPC host"
+        default "traini-grpc-collar-dev-nlb-06c70e7556ee7ab5.elb.us-east-1.amazonaws.com"
+        help
+            gRPC conversation service host reused from the Android app.
+
+    config COLLAR_CONVERSATION_PORT
+        int "Conversation gRPC port"
+        range 1 65535
+        default 50051
+        help
+            gRPC conversation service port.
+
+    config COLLAR_CONVERSATION_USER_ID
+        string "Conversation user-id metadata"
+        default "demo_user"
+        help
+            Default value for the gRPC metadata header user-id.
+
+    config COLLAR_CONVERSATION_AUDIO_SAMPLE_RATE
+        int "Conversation audio sample rate"
+        range 8000 48000
+        default 24000
+        help
+            Audio sample rate derived from the Android app defaults.
+
+    config COLLAR_CONVERSATION_AUDIO_CHANNELS
+        int "Conversation audio channels"
+        range 1 2
+        default 1
+        help
+            Number of audio channels for the conversation stream.
+
+    config COLLAR_CONVERSATION_AUDIO_BIT_DEPTH
+        int "Conversation audio bit depth"
+        range 8 32
+        default 16
+        help
+            Audio bit depth for the conversation stream.
+
+    config COLLAR_CONVERSATION_ENCODING
+        string "Conversation audio encoding"
+        default "pcm16"
+        help
+            Audio encoding string sent in Traini AudioFormat.
+
+    config COLLAR_CONVERSATION_UPLINK_BASE64
+        bool "Conversation uplink audio uses base64"
+        default n
+        help
+            Android app currently sends raw audio bytes without base64 on uplink.
+
+    config COLLAR_CONVERSATION_DOWNLINK_BASE64
+        bool "Conversation downlink audio may use base64"
+        default y
+        help
+            Android app currently allows base64 audio payloads on downlink.
+
+    config COLLAR_CONVERSATION_AUTODETECT_DOWNLINK_BASE64
+        bool "Autodetect base64 downlink audio"
+        default y
+        help
+            Android app currently auto-detects whether downlink audio_data is base64 text.
+
 endmenu
