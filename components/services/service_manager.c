@@ -11,7 +11,7 @@
 #include "services/conversation_service.h"
 #include "services/wifi_service.h"
 
-#define SERVICE_MANAGER_STACK_WORDS    2048
+#define SERVICE_MANAGER_STACK_WORDS    4096
 #define SERVICE_MANAGER_PRIORITY       9
 #define SERVICE_MANAGER_CORE           tskNO_AFFINITY
 

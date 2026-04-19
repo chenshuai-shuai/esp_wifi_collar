@@ -141,7 +141,6 @@ static esp_err_t cloud_service_probe_once(void)
 
     s_cloud.last_probe_us = esp_timer_get_time();
     s_cloud.dns_resolved = false;
-    s_cloud.reachable = false;
     s_cloud.resolved_addr[0] = '\0';
     cloud_service_set_error("");
 
@@ -175,6 +174,7 @@ static esp_err_t cloud_service_probe_once(void)
     }
 
     s_cloud.failure_count++;
+    s_cloud.reachable = false;
     if (errno != 0) {
         snprintf(s_cloud.last_error, sizeof(s_cloud.last_error), "connect errno=%d", errno);
     } else {

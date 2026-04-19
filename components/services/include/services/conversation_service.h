@@ -13,3 +13,8 @@ void conversation_service_log_status(void);
 bool conversation_service_is_configured(void);
 const char *conversation_service_host(void);
 uint16_t conversation_service_port(void);
+bool conversation_service_transport_ready(void);
+bool conversation_service_stream_ready(void);
+bool conversation_service_stream_writable(void);
+esp_err_t conversation_service_start_session(const char *session_id);
+esp_err_t conversation_service_send_audio(const uint8_t *pcm, size_t len, uint64_t seq);
