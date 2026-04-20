@@ -16,5 +16,7 @@ uint16_t conversation_service_port(void);
 bool conversation_service_transport_ready(void);
 bool conversation_service_stream_ready(void);
 bool conversation_service_stream_writable(void);
+bool conversation_service_session_active(void);
 esp_err_t conversation_service_start_session(const char *session_id);
+esp_err_t conversation_service_end_session(void);
 esp_err_t conversation_service_send_audio(const uint8_t *pcm, size_t len, uint64_t seq);

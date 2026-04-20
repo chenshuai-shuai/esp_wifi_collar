@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_tls_crypto.h"
 
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
@@ -39,7 +40,9 @@
 #define CONVERSATION_GRPC_PREFIX_LEN           5
 #define CONVERSATION_AUDIO_QUEUE_LEN           8
 #define CONVERSATION_AUDIO_MAX_BYTES           2048
+#define CONVERSATION_AUDIO_BASE64_MAX_BYTES    ((((CONVERSATION_AUDIO_MAX_BYTES) + 2U) / 3U) * 4U)
 #define CONVERSATION_DEFAULT_SESSION_PREFIX    "esp32c3"
+#define CONVERSATION_END_RPC_TIMEOUT_US        (5LL * 1000000LL)
 
 #define HTTP2_FRAME_DATA                       0x0
 #define HTTP2_FRAME_HEADERS                    0x1
@@ -56,6 +59,7 @@
 #define HTTP2_SETTINGS_ACK_FLAG                0x1
 
 #define GRPC_STREAM_PATH                       "/traini.ConversationService/StreamConversation"
+#define GRPC_END_PATH                          "/traini.ConversationService/EndConversation"
 #define GRPC_CONTENT_TYPE                      "application/grpc+proto"
 #define GRPC_TE_VALUE                          "trailers"
 #define GRPC_USER_AGENT                        "esp32c3-collar/0.1"
@@ -87,22 +91,32 @@ typedef struct {
     bool started;
     bool wifi_ready;
     bool configured;
+    bool session_requested;
+    bool end_requested;
     bool auto_session_started;
+    bool stream_local_end_sent;
     bool server_settings_seen;
     bool response_headers_seen;
     bool response_trailers_seen;
+    bool end_response_headers_seen;
+    bool end_response_trailers_seen;
+    bool end_summary_received;
     uint16_t port;
     uint32_t sample_rate;
     uint8_t channels;
     uint8_t bit_depth;
     int sock;
     int64_t last_attempt_us;
+    int64_t end_request_started_us;
     uint32_t next_stream_id;
     uint32_t active_stream_id;
+    uint32_t end_stream_id;
     uint32_t transport_success_count;
     uint32_t transport_failure_count;
     uint32_t stream_open_count;
     uint32_t stream_failure_count;
+    uint32_t end_success_count;
+    uint32_t end_failure_count;
     uint32_t tx_audio_chunks;
     uint32_t tx_audio_bytes;
     uint32_t rx_audio_chunks;
@@ -131,6 +145,13 @@ static QueueHandle_t s_audio_queue;
 static StaticSemaphore_t s_audio_enqueue_mutex_tcb;
 static SemaphoreHandle_t s_audio_enqueue_mutex;
 static conversation_audio_item_t s_audio_enqueue_item;
+#ifdef CONFIG_COLLAR_CONVERSATION_UPLINK_BASE64
+static uint8_t s_audio_base64_buffer[CONVERSATION_AUDIO_BASE64_MAX_BYTES];
+#endif
+static uint8_t s_audio_grpc_payload[CONVERSATION_GRPC_PREFIX_LEN +
+                                    CONVERSATION_AUDIO_BASE64_MAX_BYTES + 128];
+
+static void conversation_service_reset_transport_state(bool clear_session);
 
 static const char *conversation_uplink_base64_string(void)
 {
@@ -167,6 +188,18 @@ static void conversation_service_set_error(const char *error)
 static void conversation_service_set_event(const char *event)
 {
     strlcpy(s_conversation.last_event, event != NULL ? event : "", sizeof(s_conversation.last_event));
+}
+
+static bool conversation_service_audio_queue_has_pending(void)
+{
+    return s_audio_queue != NULL && uxQueueMessagesWaiting(s_audio_queue) > 0U;
+}
+
+static void conversation_service_clear_audio_queue(void)
+{
+    if (s_audio_queue != NULL) {
+        xQueueReset(s_audio_queue);
+    }
 }
 
 static void conversation_service_close_socket(void)
@@ -270,6 +303,14 @@ static const char *conversation_service_state_string(void)
         return "tcp_ready";
     }
 
+    if (!s_conversation.session_requested) {
+        return "session_idle";
+    }
+
+    if (s_conversation.end_requested) {
+        return "ending_session";
+    }
+
     if (s_conversation.transport_state != CONVERSATION_TRANSPORT_READY) {
         return conversation_transport_state_string();
     }
@@ -281,11 +322,19 @@ static void conversation_service_reset_stream_state(bool clear_session)
 {
     s_conversation.stream_state = CONVERSATION_STREAM_IDLE;
     s_conversation.active_stream_id = 0U;
+    s_conversation.end_stream_id = 0U;
+    s_conversation.auto_session_started = false;
+    s_conversation.stream_local_end_sent = false;
     s_conversation.response_headers_seen = false;
     s_conversation.response_trailers_seen = false;
+    s_conversation.end_response_headers_seen = false;
+    s_conversation.end_response_trailers_seen = false;
+    s_conversation.end_summary_received = false;
+    s_conversation.end_request_started_us = 0;
     if (clear_session) {
         s_conversation.session_id[0] = '\0';
-        s_conversation.auto_session_started = false;
+        s_conversation.session_requested = false;
+        s_conversation.end_requested = false;
     }
 }
 
@@ -565,6 +614,31 @@ static esp_err_t conversation_service_send_settings_ack(int sock)
                                          sizeof(settings_ack_frame));
 }
 
+static void conversation_service_finish_session_end(bool success, const char *error)
+{
+    char session_id[CONVERSATION_SESSION_ID_MAX_LEN];
+
+    strlcpy(session_id, s_conversation.session_id, sizeof(session_id));
+
+    if (success) {
+        s_conversation.end_success_count++;
+        conversation_service_set_error("");
+        conversation_service_set_event("session_end_complete");
+        ESP_LOGI(TAG, "Conversation session closed: session=%s",
+                 session_id[0] != '\0' ? session_id : "-");
+    } else {
+        s_conversation.end_failure_count++;
+        conversation_service_set_error(error != NULL ? error : "session_end_failed");
+        conversation_service_set_event("session_end_failed");
+        ESP_LOGW(TAG, "Conversation session end failed: session=%s error=%s",
+                 session_id[0] != '\0' ? session_id : "-",
+                 s_conversation.last_error[0] != '\0' ? s_conversation.last_error : "unknown");
+    }
+
+    conversation_service_clear_audio_queue();
+    conversation_service_reset_transport_state(true);
+}
+
 static bool conversation_service_transport_due(int64_t now_us)
 {
     const int64_t retry_interval_us =
@@ -712,6 +786,7 @@ static esp_err_t conversation_service_open_transport(void)
         }
 
         s_conversation.sock = sock;
+        conversation_service_reset_stream_state(false);
         s_conversation.transport_state = CONVERSATION_TRANSPORT_READY;
         s_conversation.transport_success_count++;
         s_conversation.next_stream_id = 1U;
@@ -830,6 +905,17 @@ static esp_err_t conversation_service_encode_audio_format(uint8_t *out, size_t o
     return conversation_service_append_string_field(out, out_len, 4U, s_conversation.encoding, used);
 }
 
+static esp_err_t conversation_service_encode_end_conversation_request(uint8_t *out, size_t out_len,
+                                                                     size_t *used)
+{
+    if (s_conversation.session_id[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *used = 0U;
+    return conversation_service_append_string_field(out, out_len, 1U, s_conversation.session_id, used);
+}
+
 static esp_err_t conversation_service_encode_timestamp(uint8_t *out, size_t out_len, size_t *used)
 {
     const int64_t now_us = esp_timer_get_time();
@@ -868,7 +954,23 @@ static esp_err_t conversation_service_encode_audio_chunk(const conversation_audi
         return ret;
     }
 
-    ret = conversation_service_append_bytes_field(out, out_len, 1U, item->data, item->len, used);
+    const uint8_t *audio_data = item->data;
+    size_t audio_len = item->len;
+
+#ifdef CONFIG_COLLAR_CONVERSATION_UPLINK_BASE64
+    if (item->len > 0U) {
+        size_t base64_audio_len = 0U;
+        int base64_ret = esp_crypto_base64_encode(s_audio_base64_buffer, sizeof(s_audio_base64_buffer),
+                                                  &base64_audio_len, item->data, item->len);
+        if (base64_ret != 0) {
+            return ESP_FAIL;
+        }
+        audio_data = s_audio_base64_buffer;
+        audio_len = base64_audio_len;
+    }
+#endif
+
+    ret = conversation_service_append_bytes_field(out, out_len, 1U, audio_data, audio_len, used);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -989,6 +1091,41 @@ static bool conversation_service_parse_audio_complete(const uint8_t *data, size_
     return true;
 }
 
+static bool conversation_service_parse_session_summary(const uint8_t *data, size_t len,
+                                                       char *session_id, size_t session_id_len)
+{
+    size_t offset = 0U;
+    session_id[0] = '\0';
+
+    while (offset < len) {
+        uint64_t key;
+        if (!protobuf_read_varint(data, len, &offset, &key)) {
+            return false;
+        }
+
+        const uint32_t field_number = (uint32_t)(key >> 3U);
+        const uint8_t wire_type = (uint8_t)(key & 0x07U);
+
+        if (field_number == 1U && wire_type == 2U) {
+            uint64_t field_len;
+            if (!protobuf_read_varint(data, len, &offset, &field_len) ||
+                (offset + field_len) > len) {
+                return false;
+            }
+
+            size_t copy_len = (size_t)field_len < (session_id_len - 1U) ?
+                (size_t)field_len : (session_id_len - 1U);
+            memcpy(session_id, data + offset, copy_len);
+            session_id[copy_len] = '\0';
+            offset += (size_t)field_len;
+        } else if (!protobuf_skip_field(data, len, &offset, wire_type)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool conversation_service_parse_error_event(const uint8_t *data, size_t len,
                                                    char *code, size_t code_len,
                                                    char *message, size_t message_len)
@@ -1098,6 +1235,49 @@ static bool conversation_service_parse_conversation_event(const uint8_t *data, s
     return true;
 }
 
+static esp_err_t conversation_service_process_end_response_data(const uint8_t *payload,
+                                                                size_t payload_len)
+{
+    size_t offset = 0U;
+
+    while ((offset + CONVERSATION_GRPC_PREFIX_LEN) <= payload_len) {
+        const uint8_t compressed = payload[offset];
+        const uint32_t msg_len =
+            ((uint32_t)payload[offset + 1] << 24) |
+            ((uint32_t)payload[offset + 2] << 16) |
+            ((uint32_t)payload[offset + 3] << 8) |
+            ((uint32_t)payload[offset + 4]);
+
+        offset += CONVERSATION_GRPC_PREFIX_LEN;
+        if ((offset + msg_len) > payload_len) {
+            return ESP_FAIL;
+        }
+
+        if (compressed != 0U) {
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
+        char session_id[CONVERSATION_SESSION_ID_MAX_LEN];
+        if (!conversation_service_parse_session_summary(payload + offset, msg_len,
+                                                        session_id, sizeof(session_id))) {
+            return ESP_FAIL;
+        }
+
+        s_conversation.end_summary_received = true;
+        snprintf(s_conversation.last_event, sizeof(s_conversation.last_event),
+                 "end_summary session=%.48s",
+                 session_id[0] != '\0' ? session_id : "-");
+        ESP_LOGI(TAG, "gRPC EndConversation summary: session=%s",
+                 session_id[0] != '\0' ? session_id : "-");
+        conversation_service_finish_session_end(true, NULL);
+        return ESP_OK;
+
+        offset += msg_len;
+    }
+
+    return (offset == payload_len) ? ESP_OK : ESP_FAIL;
+}
+
 static esp_err_t conversation_service_process_grpc_data(const uint8_t *payload, size_t payload_len)
 {
     size_t offset = 0U;
@@ -1132,7 +1312,7 @@ static esp_err_t conversation_service_process_grpc_data(const uint8_t *payload, 
     return ESP_OK;
 }
 
-static esp_err_t conversation_service_send_stream_headers(void)
+static esp_err_t conversation_service_send_rpc_headers(uint32_t stream_id, const char *path)
 {
     uint8_t block[CONVERSATION_HEADERS_BLOCK_MAX_LEN];
     char authority[CONVERSATION_HOST_MAX_LEN + 8];
@@ -1149,7 +1329,7 @@ static esp_err_t conversation_service_send_stream_headers(void)
     if (chunk == 0U) return ESP_ERR_NO_MEM;
     used += chunk;
 
-    chunk = hpack_append_literal_indexed_name(block + used, sizeof(block) - used, 4U, GRPC_STREAM_PATH);
+    chunk = hpack_append_literal_indexed_name(block + used, sizeof(block) - used, 4U, path);
     if (chunk == 0U) return ESP_ERR_NO_MEM;
     used += chunk;
 
@@ -1182,9 +1362,14 @@ static esp_err_t conversation_service_send_stream_headers(void)
 
     return conversation_service_send_frame(HTTP2_FRAME_HEADERS,
                                            HTTP2_FLAG_END_HEADERS,
-                                           s_conversation.active_stream_id,
+                                           stream_id,
                                            block,
                                            (uint32_t)used);
+}
+
+static esp_err_t conversation_service_send_stream_headers(void)
+{
+    return conversation_service_send_rpc_headers(s_conversation.active_stream_id, GRPC_STREAM_PATH);
 }
 
 static void conversation_service_generate_default_session_id(void)
@@ -1203,6 +1388,10 @@ static esp_err_t conversation_service_open_stream_if_needed(void)
     if (s_conversation.stream_state == CONVERSATION_STREAM_OPEN ||
         s_conversation.stream_state == CONVERSATION_STREAM_OPENING) {
         return ESP_OK;
+    }
+
+    if (!s_conversation.session_requested) {
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (s_conversation.transport_state != CONVERSATION_TRANSPORT_READY ||
@@ -1234,15 +1423,41 @@ static esp_err_t conversation_service_open_stream_if_needed(void)
     return ESP_OK;
 }
 
-static esp_err_t conversation_service_send_audio_frame(const conversation_audio_item_t *item)
+static esp_err_t conversation_service_send_stream_end(void)
 {
-    uint8_t grpc_payload[CONVERSATION_GRPC_PREFIX_LEN + CONVERSATION_AUDIO_MAX_BYTES + 128];
+    if (s_conversation.active_stream_id == 0U || s_conversation.stream_local_end_sent) {
+        return ESP_OK;
+    }
+
+    esp_err_t ret = conversation_service_send_frame(HTTP2_FRAME_DATA,
+                                                    HTTP2_FLAG_END_STREAM,
+                                                    s_conversation.active_stream_id,
+                                                    NULL,
+                                                    0U);
+    if (ret == ESP_OK) {
+        s_conversation.stream_local_end_sent = true;
+        conversation_service_set_event("stream_end_sent");
+        ESP_LOGI(TAG, "gRPC stream local end sent: stream=%u session=%s",
+                 (unsigned int)s_conversation.active_stream_id,
+                 s_conversation.session_id);
+    }
+
+    return ret;
+}
+
+static esp_err_t conversation_service_send_end_request(uint32_t stream_id)
+{
+    uint8_t grpc_payload[CONVERSATION_GRPC_PREFIX_LEN + CONVERSATION_SESSION_ID_MAX_LEN + 16];
     size_t message_len = 0U;
-    esp_err_t ret = conversation_service_encode_audio_chunk(
-        item,
+    esp_err_t ret = conversation_service_encode_end_conversation_request(
         grpc_payload + CONVERSATION_GRPC_PREFIX_LEN,
         sizeof(grpc_payload) - CONVERSATION_GRPC_PREFIX_LEN,
         &message_len);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = conversation_service_send_rpc_headers(stream_id, GRPC_END_PATH);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -1253,10 +1468,35 @@ static esp_err_t conversation_service_send_audio_frame(const conversation_audio_
     grpc_payload[3] = (uint8_t)((message_len >> 8) & 0xffU);
     grpc_payload[4] = (uint8_t)(message_len & 0xffU);
 
+    return conversation_service_send_frame(HTTP2_FRAME_DATA,
+                                           HTTP2_FLAG_END_STREAM,
+                                           stream_id,
+                                           grpc_payload,
+                                           (uint32_t)(CONVERSATION_GRPC_PREFIX_LEN + message_len));
+}
+
+static esp_err_t conversation_service_send_audio_frame(const conversation_audio_item_t *item)
+{
+    size_t message_len = 0U;
+    esp_err_t ret = conversation_service_encode_audio_chunk(
+        item,
+        s_audio_grpc_payload + CONVERSATION_GRPC_PREFIX_LEN,
+        sizeof(s_audio_grpc_payload) - CONVERSATION_GRPC_PREFIX_LEN,
+        &message_len);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    s_audio_grpc_payload[0] = 0x00;
+    s_audio_grpc_payload[1] = (uint8_t)((message_len >> 24) & 0xffU);
+    s_audio_grpc_payload[2] = (uint8_t)((message_len >> 16) & 0xffU);
+    s_audio_grpc_payload[3] = (uint8_t)((message_len >> 8) & 0xffU);
+    s_audio_grpc_payload[4] = (uint8_t)(message_len & 0xffU);
+
     ret = conversation_service_send_frame(HTTP2_FRAME_DATA,
                                           0x00,
                                           s_conversation.active_stream_id,
-                                          grpc_payload,
+                                          s_audio_grpc_payload,
                                           (uint32_t)(CONVERSATION_GRPC_PREFIX_LEN + message_len));
     if (ret == ESP_OK) {
         s_conversation.tx_audio_chunks++;
@@ -1298,7 +1538,62 @@ static void conversation_service_process_send_queue(void)
     }
 }
 
-static void conversation_service_handle_headers_frame(uint32_t stream_id, uint8_t flags)
+static void conversation_service_process_end_request(void)
+{
+    if (!s_conversation.end_requested ||
+        s_conversation.transport_state != CONVERSATION_TRANSPORT_READY ||
+        s_conversation.sock < 0) {
+        return;
+    }
+
+    if (s_conversation.end_stream_id != 0U) {
+        if ((esp_timer_get_time() - s_conversation.end_request_started_us) >
+            CONVERSATION_END_RPC_TIMEOUT_US) {
+            conversation_service_finish_session_end(false, "end_response_timeout");
+        }
+        return;
+    }
+
+    if (conversation_service_audio_queue_has_pending()) {
+        return;
+    }
+
+    if (s_conversation.active_stream_id != 0U &&
+        !s_conversation.stream_local_end_sent &&
+        (s_conversation.stream_state == CONVERSATION_STREAM_OPEN ||
+         s_conversation.stream_state == CONVERSATION_STREAM_OPENING)) {
+        esp_err_t ret = conversation_service_send_stream_end();
+        if (ret != ESP_OK) {
+            conversation_service_finish_session_end(false, "stream_end_send_failed");
+        }
+        return;
+    }
+
+    if (s_conversation.active_stream_id != 0U &&
+        (s_conversation.stream_state == CONVERSATION_STREAM_CLOSED ||
+         s_conversation.stream_state == CONVERSATION_STREAM_FAILED)) {
+        s_conversation.stream_local_end_sent = true;
+    }
+
+    s_conversation.end_stream_id = s_conversation.next_stream_id;
+    s_conversation.next_stream_id += 2U;
+    s_conversation.end_request_started_us = esp_timer_get_time();
+
+    esp_err_t ret = conversation_service_send_end_request(s_conversation.end_stream_id);
+    if (ret != ESP_OK) {
+        s_conversation.end_stream_id = 0U;
+        s_conversation.end_request_started_us = 0;
+        conversation_service_finish_session_end(false, "end_request_send_failed");
+        return;
+    }
+
+    conversation_service_set_event("end_request_sent");
+    ESP_LOGI(TAG, "gRPC EndConversation sent: stream=%u session=%s",
+             (unsigned int)s_conversation.end_stream_id,
+             s_conversation.session_id);
+}
+
+static void conversation_service_handle_stream_headers_frame(uint32_t stream_id, uint8_t flags)
 {
     if (stream_id != s_conversation.active_stream_id) {
         return;
@@ -1320,6 +1615,27 @@ static void conversation_service_handle_headers_frame(uint32_t stream_id, uint8_
     }
 }
 
+static void conversation_service_handle_end_headers_frame(uint32_t stream_id, uint8_t flags)
+{
+    if (stream_id != s_conversation.end_stream_id) {
+        return;
+    }
+
+    if (!s_conversation.end_response_headers_seen) {
+        s_conversation.end_response_headers_seen = true;
+        conversation_service_set_event("end_response_headers");
+        ESP_LOGI(TAG, "gRPC EndConversation headers: stream=%u session=%s",
+                 (unsigned int)stream_id, s_conversation.session_id);
+    } else {
+        s_conversation.end_response_trailers_seen = true;
+        conversation_service_set_event("end_response_trailers");
+    }
+
+    if ((flags & HTTP2_FLAG_END_STREAM) != 0U) {
+        conversation_service_finish_session_end(true, NULL);
+    }
+}
+
 static void conversation_service_handle_frame(uint8_t frame_type, uint8_t flags, uint32_t stream_id,
                                               const uint8_t *payload, uint32_t payload_len)
 {
@@ -1332,7 +1648,11 @@ static void conversation_service_handle_frame(uint8_t frame_type, uint8_t flags,
         break;
 
     case HTTP2_FRAME_HEADERS:
-        conversation_service_handle_headers_frame(stream_id, flags);
+        if (stream_id == s_conversation.active_stream_id) {
+            conversation_service_handle_stream_headers_frame(stream_id, flags);
+        } else if (stream_id == s_conversation.end_stream_id) {
+            conversation_service_handle_end_headers_frame(stream_id, flags);
+        }
         break;
 
     case HTTP2_FRAME_DATA:
@@ -1348,6 +1668,16 @@ static void conversation_service_handle_frame(uint8_t frame_type, uint8_t flags,
                 s_conversation.stream_state = CONVERSATION_STREAM_CLOSED;
                 conversation_service_set_event("stream_data_end");
             }
+        } else if (stream_id == s_conversation.end_stream_id) {
+            esp_err_t ret = conversation_service_process_end_response_data(payload, payload_len);
+            if (ret != ESP_OK) {
+                conversation_service_finish_session_end(false, "end_response_parse_failed");
+                break;
+            }
+
+            if ((flags & HTTP2_FLAG_END_STREAM) != 0U) {
+                conversation_service_finish_session_end(true, NULL);
+            }
         }
         break;
 
@@ -1357,6 +1687,8 @@ static void conversation_service_handle_frame(uint8_t frame_type, uint8_t flags,
             s_conversation.stream_failure_count++;
             conversation_service_set_error("rst_stream");
             ESP_LOGW(TAG, "gRPC stream reset by server");
+        } else if (stream_id == s_conversation.end_stream_id) {
+            conversation_service_finish_session_end(false, "end_rst_stream");
         }
         break;
 
@@ -1496,12 +1828,15 @@ static void conversation_service_transport_tick(void)
         return;
     }
 
-    if (!s_conversation.auto_session_started) {
+    if (s_conversation.session_requested &&
+        !s_conversation.auto_session_started &&
+        (!s_conversation.end_requested || conversation_service_audio_queue_has_pending())) {
         (void)conversation_service_open_stream_if_needed();
     }
 
     conversation_service_poll_frames();
     conversation_service_process_send_queue();
+    conversation_service_process_end_request();
 }
 
 static void conversation_service_task(void *arg)
@@ -1611,12 +1946,14 @@ void conversation_service_log_status(void)
     const char *probe_error = cloud_service_last_error();
 
     ESP_LOGI(TAG,
-             "Conversation status: state=%s host=%s port=%u user=%s session=%s wifi=%s cloud=%s probe_err=%s transport_err=%s peer=%s frame=%s tx=%lu/%lu rx=%lu/%lu complete=%lu err=%lu last=%s audio=%lu/%u/%u enc=%s up_b64=%s down_b64=%s auto_b64=%s",
+             "Conversation status: state=%s host=%s port=%u user=%s session=%s requested=%s ending=%s wifi=%s cloud=%s probe_err=%s transport_err=%s peer=%s frame=%s tx=%lu/%lu rx=%lu/%lu complete=%lu err=%lu end_ok=%lu end_fail=%lu last=%s audio=%lu/%u/%u enc=%s up_b64=%s down_b64=%s auto_b64=%s",
              conversation_service_state_string(),
              s_conversation.host[0] != '\0' ? s_conversation.host : "-",
              (unsigned int)s_conversation.port,
              s_conversation.user_id[0] != '\0' ? s_conversation.user_id : "-",
              s_conversation.session_id[0] != '\0' ? s_conversation.session_id : "-",
+             s_conversation.session_requested ? "yes" : "no",
+             s_conversation.end_requested ? "yes" : "no",
              s_conversation.wifi_ready ? "ready" : "no",
              cloud_service_is_reachable() ? "reachable" : "no",
              probe_error[0] != '\0' ? probe_error : "-",
@@ -1630,6 +1967,8 @@ void conversation_service_log_status(void)
              (unsigned long)s_conversation.rx_audio_bytes,
              (unsigned long)s_conversation.rx_audio_complete_count,
              (unsigned long)s_conversation.rx_error_count,
+             (unsigned long)s_conversation.end_success_count,
+             (unsigned long)s_conversation.end_failure_count,
              s_conversation.last_event[0] != '\0' ? s_conversation.last_event : "-",
              (unsigned long)s_conversation.sample_rate,
              (unsigned int)s_conversation.channels,
@@ -1670,8 +2009,19 @@ bool conversation_service_stream_writable(void)
     return s_conversation.transport_state == CONVERSATION_TRANSPORT_READY &&
            s_conversation.sock >= 0 &&
            s_conversation.active_stream_id != 0U &&
+           !s_conversation.end_requested &&
            (s_conversation.stream_state == CONVERSATION_STREAM_OPEN ||
             s_conversation.stream_state == CONVERSATION_STREAM_OPENING);
+}
+
+bool conversation_service_session_active(void)
+{
+    return s_conversation.session_requested ||
+           s_conversation.end_requested ||
+           s_conversation.session_id[0] != '\0' ||
+           s_conversation.active_stream_id != 0U ||
+           s_conversation.end_stream_id != 0U ||
+           conversation_service_audio_queue_has_pending();
 }
 
 esp_err_t conversation_service_start_session(const char *session_id)
@@ -1680,10 +2030,32 @@ esp_err_t conversation_service_start_session(const char *session_id)
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (conversation_service_session_active()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    conversation_service_clear_audio_queue();
     strlcpy(s_conversation.session_id, session_id, sizeof(s_conversation.session_id));
-    s_conversation.auto_session_started = false;
+    s_conversation.session_requested = true;
+    s_conversation.end_requested = false;
     conversation_service_reset_stream_state(false);
+    conversation_service_set_error("");
     conversation_service_set_event("session_requested");
+    return ESP_OK;
+}
+
+esp_err_t conversation_service_end_session(void)
+{
+    if (!s_conversation.session_requested || s_conversation.session_id[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_conversation.end_requested) {
+        return ESP_OK;
+    }
+
+    s_conversation.end_requested = true;
+    conversation_service_set_event("session_end_requested");
     return ESP_OK;
 }
 
@@ -1694,6 +2066,10 @@ esp_err_t conversation_service_send_audio(const uint8_t *pcm, size_t len, uint64
     }
 
     if (s_audio_queue == NULL || s_audio_enqueue_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!s_conversation.session_requested || s_conversation.end_requested) {
         return ESP_ERR_INVALID_STATE;
     }
 

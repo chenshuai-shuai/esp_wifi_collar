@@ -156,6 +156,33 @@ void wifi_service_log_status(void)
     }
 }
 
+bool wifi_service_sta_ready(void)
+{
+    return s_wifi.initialized && s_wifi.sta_got_ip;
+}
+
+const char *wifi_service_sta_ip(void)
+{
+    if (!s_wifi.initialized || !s_wifi.sta_got_ip || s_wifi.sta_ip[0] == '\0') {
+        return "";
+    }
+    return s_wifi.sta_ip;
+}
+
+size_t wifi_service_sta_ip_copy(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0U) {
+        return 0U;
+    }
+
+    if (!s_wifi.initialized || !s_wifi.sta_got_ip || s_wifi.sta_ip[0] == '\0') {
+        out[0] = '\0';
+        return 0U;
+    }
+
+    return strlcpy(out, s_wifi.sta_ip, out_len);
+}
+
 static void wifi_service_set_error(const char *error)
 {
     strlcpy(s_wifi.last_error, error != NULL ? error : "", sizeof(s_wifi.last_error));

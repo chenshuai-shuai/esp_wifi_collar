@@ -1,4 +1,6 @@
 #include "bsp/bsp_board.h"
+#include "bsp/microphone_input.h"
+#include "bsp/speaker_output.h"
 
 #include "esp_log.h"
 
@@ -9,5 +11,26 @@ static const char *TAG = "bsp";
 esp_err_t bsp_board_init(void)
 {
     ESP_LOGI(TAG, "Board init: esp_wifi_collar");
-    return hal_platform_init();
+    esp_err_t ret = hal_platform_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+#if CONFIG_COLLAR_SPEAKER_ENABLE
+    ret = bsp_speaker_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+#endif
+
+#if CONFIG_COLLAR_MICROPHONE_ENABLE
+    ret = bsp_microphone_init();
+    if (ret == ESP_ERR_NOT_SUPPORTED) {
+        ESP_LOGW(TAG, "Microphone input not supported on this target; board init continuing");
+    } else if (ret != ESP_OK) {
+        return ret;
+    }
+#endif
+
+    return ESP_OK;
 }

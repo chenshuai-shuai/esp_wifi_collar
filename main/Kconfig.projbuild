@@ -119,9 +119,9 @@ menu "Collar Configuration"
 
     config COLLAR_CONVERSATION_UPLINK_BASE64
         bool "Conversation uplink audio uses base64"
-        default n
+        default y
         help
-            Android app currently sends raw audio bytes without base64 on uplink.
+            Android app currently base64-encodes audio_data on uplink.
 
     config COLLAR_CONVERSATION_DOWNLINK_BASE64
         bool "Conversation downlink audio may use base64"
@@ -166,12 +166,21 @@ menu "Collar Configuration"
 
     config COLLAR_CONVERSATION_SELF_TEST_ENABLE
         bool "Enable synthetic conversation audio self-test"
-        default n
+        default y
         help
             Start an application-level self-test that opens a gRPC conversation
             session and sends synthesized PCM frames without requiring a microphone
             or speaker. This is intended to validate the cloud conversation path
             before audio hardware is wired in.
+
+    config COLLAR_CONVERSATION_SELF_TEST_START_DELAY_SEC
+        int "Self-test start delay (seconds)"
+        range 0 30
+        default 5
+        depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
+        help
+            Delay after the ESP requests a conversation session before it starts
+            sending AudioChunk data to the server.
 
     config COLLAR_CONVERSATION_SELF_TEST_CHUNK_MS
         int "Self-test chunk duration (ms)"
@@ -196,5 +205,190 @@ menu "Collar Configuration"
         depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
         help
             Idle delay before automatically starting the next synthetic test session.
+
+    config COLLAR_MICROPHONE_ENABLE
+        bool "Enable onboard PDM microphone input"
+        default y
+        help
+            Initialize the ESP32-C3 microphone capture path for MP23DB01HPTR.
+            On ESP32-C3 this uses SPI master clocking plus software PDM-to-PCM
+            decimation instead of the unsupported hardware PDM RX driver.
+
+    config COLLAR_MICROPHONE_LR_HIGH
+        bool "Microphone L/R pin strapped HIGH"
+        default n
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            Set this if the MP23DB01HPTR L/R pin is tied to VDD.
+            Low means the microphone drives data on the rising-clock slot and
+            this driver samples with SPI mode 0. High selects the falling-clock
+            slot and uses SPI mode 1.
+
+    config COLLAR_MICROPHONE_CLK_GPIO
+        int "Microphone PDM CLK gpio"
+        range 0 21
+        default 3
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            GPIO driving the shared PDM clock line.
+
+    config COLLAR_MICROPHONE_DIN_GPIO
+        int "Microphone PDM DIN gpio"
+        range 0 21
+        default 4
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            GPIO reading the shared PDM data line.
+
+    config COLLAR_MICROPHONE_SAMPLE_RATE
+        int "Microphone sample rate"
+        range 8000 48000
+        default 24000
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            PCM sample rate produced by the software PDM decimator.
+
+    config COLLAR_MICROPHONE_STEREO
+        bool "Capture both microphone slots"
+        default n
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            Experimental dual-edge capture for two MP23DB01HPTR microphones on a
+            shared CLK/DOUT bus. This mode alternates SPI mode 0/1 at 2x raw PDM
+            clock and reconstructs stereo PCM in software. Keep disabled if you
+            only need one microphone or if capture stability is more important
+            than trying to recover both slots on ESP32-C3.
+
+    config COLLAR_MICROPHONE_TEST_ENABLE
+        bool "Enable microphone capture self-test"
+        default y
+        depends on COLLAR_MICROPHONE_ENABLE
+        help
+            Periodically read PCM from the microphone input and print amplitude statistics.
+
+    config COLLAR_MICROPHONE_TEST_CHUNK_MS
+        int "Microphone test chunk duration (ms)"
+        range 10 100
+        default 20
+        depends on COLLAR_MICROPHONE_TEST_ENABLE
+        help
+            PCM duration read from the microphone each cycle.
+
+    config COLLAR_MICROPHONE_TEST_LOG_INTERVAL_MS
+        int "Microphone test log interval (ms)"
+        range 200 5000
+        default 1000
+        depends on COLLAR_MICROPHONE_TEST_ENABLE
+        help
+            How often microphone amplitude statistics are printed.
+
+    config COLLAR_MICROPHONE_STREAM_ENABLE
+        bool "Stream microphone PCM to PC over UDP"
+        default n
+        depends on COLLAR_MICROPHONE_TEST_ENABLE
+        help
+            Mirror the same PCM blocks read by the microphone self-test to a PC over UDP.
+            The PC can then write them into a WAV file and optionally play them in real time.
+
+    config COLLAR_MICROPHONE_STREAM_HOST
+        string "PC receiver IPv4 address"
+        default "192.168.1.2"
+        depends on COLLAR_MICROPHONE_STREAM_ENABLE
+        help
+            IPv4 address of the PC that will receive microphone PCM UDP packets.
+
+    config COLLAR_MICROPHONE_STREAM_PORT
+        int "PC receiver UDP port"
+        range 1 65535
+        default 3333
+        depends on COLLAR_MICROPHONE_STREAM_ENABLE
+        help
+            UDP port on the PC receiver used for live microphone PCM streaming.
+
+    config COLLAR_SPEAKER_ENABLE
+        bool "Enable onboard speaker output"
+        default y
+        help
+            Initialize the ESP32-C3 I2S TX path and the MAX98357A SD_MODE control pin.
+
+    config COLLAR_SPEAKER_SD_MODE_GPIO
+        int "Speaker amp SD_MODE gpio"
+        range 0 21
+        default 5
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            GPIO driving the amplifier SD_MODE pin. Keep it high for playback.
+
+    config COLLAR_SPEAKER_DOUT_GPIO
+        int "Speaker I2S DOUT gpio"
+        range 0 21
+        default 6
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            GPIO carrying I2S serial audio data into MAX98357A DIN.
+
+    config COLLAR_SPEAKER_BCLK_GPIO
+        int "Speaker I2S BCLK gpio"
+        range 0 21
+        default 7
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            GPIO carrying I2S bit clock into MAX98357A BCLK.
+
+    config COLLAR_SPEAKER_LRCLK_GPIO
+        int "Speaker I2S LRCLK gpio"
+        range 0 21
+        default 10
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            GPIO carrying I2S word select into MAX98357A LRCLK.
+
+    config COLLAR_SPEAKER_SAMPLE_RATE
+        int "Speaker sample rate"
+        range 8000 48000
+        default 24000
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            I2S playback sample rate used for local speaker self-test tones.
+
+    config COLLAR_SPEAKER_TEST_ENABLE
+        bool "Enable local speaker tone self-test"
+        default n
+        depends on COLLAR_SPEAKER_ENABLE
+        help
+            Continuously play a small loop of fixed-pitch tones through the MAX98357A
+            so the speaker path can be validated before cloud downlink is wired in.
+
+    config COLLAR_SPEAKER_TEST_CHUNK_MS
+        int "Speaker self-test chunk duration (ms)"
+        range 10 100
+        default 20
+        depends on COLLAR_SPEAKER_TEST_ENABLE
+        help
+            PCM buffer duration written to I2S each time.
+
+    config COLLAR_SPEAKER_TEST_TONE_MS
+        int "Speaker self-test tone duration (ms)"
+        range 100 2000
+        default 350
+        depends on COLLAR_SPEAKER_TEST_ENABLE
+        help
+            Duration of each audible note in the repeating tone pattern.
+
+    config COLLAR_SPEAKER_TEST_GAP_MS
+        int "Speaker self-test gap duration (ms)"
+        range 0 1000
+        default 120
+        depends on COLLAR_SPEAKER_TEST_ENABLE
+        help
+            Silence inserted between adjacent notes.
+
+    config COLLAR_SPEAKER_TEST_VOLUME_PERCENT
+        int "Speaker self-test volume percent"
+        range 5 90
+        default 35
+        depends on COLLAR_SPEAKER_TEST_ENABLE
+        help
+            Output amplitude scaling for the synthetic tone loop.
 
 endmenu
