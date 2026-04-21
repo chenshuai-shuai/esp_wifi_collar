@@ -282,6 +282,40 @@ menu "Collar Configuration"
         help
             How often microphone amplitude statistics are printed.
 
+    config COLLAR_MICROPHONE_DENOISE_ENABLE
+        bool "Enable SpeexDSP microphone denoise"
+        default y
+        depends on COLLAR_MICROPHONE_TEST_ENABLE
+        help
+            Apply SpeexDSP fixed-point preprocess denoise to the PCM blocks read by
+            the microphone self-test before they are logged or streamed to the PC.
+
+    config COLLAR_MICROPHONE_DENOISE_FRAME_MS
+        int "Denoise frame duration (ms)"
+        range 10 20
+        default 20
+        depends on COLLAR_MICROPHONE_DENOISE_ENABLE
+        help
+            SpeexDSP preprocess frame size. Keep this at 20 ms on ESP32-C3 unless
+            you specifically want to trade more CPU for slightly faster adaptation.
+
+    config COLLAR_MICROPHONE_DENOISE_NOISE_SUPPRESS_DB
+        int "Denoise max noise attenuation (dB)"
+        range -60 -1
+        default -24
+        depends on COLLAR_MICROPHONE_DENOISE_ENABLE
+        help
+            Maximum attenuation applied to stationary noise. More negative values
+            remove more noise but also increase the risk of hurting wanted ambience.
+
+    config COLLAR_MICROPHONE_DENOISE_VAD_ENABLE
+        bool "Enable SpeexDSP VAD diagnostics"
+        default n
+        depends on COLLAR_MICROPHONE_DENOISE_ENABLE
+        help
+            Turn on SpeexDSP VAD and expose speech-block counts in logs. This is
+            diagnostic only; the audio is not gated or muted by VAD.
+
     config COLLAR_MICROPHONE_STREAM_ENABLE
         bool "Stream microphone PCM to PC over UDP"
         default n

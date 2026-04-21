@@ -16,6 +16,9 @@ esp_err_t bsp_board_init(void)
         return ret;
     }
 
+#if CONFIG_COLLAR_SPEAKER_TEST_ENABLE || CONFIG_COLLAR_MICROPHONE_TEST_ENABLE
+    ESP_LOGI(TAG, "Board init defers audio device bring-up to app manager test mode");
+#else
 #if CONFIG_COLLAR_SPEAKER_ENABLE
     ret = bsp_speaker_init();
     if (ret != ESP_OK) {
@@ -30,6 +33,7 @@ esp_err_t bsp_board_init(void)
     } else if (ret != ESP_OK) {
         return ret;
     }
+#endif
 #endif
 
     return ESP_OK;

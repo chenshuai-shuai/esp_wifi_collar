@@ -23,6 +23,18 @@
 
 #include "services/cloud_service.h"
 
+#ifdef CONFIG_COLLAR_CONVERSATION_ENABLE
+#define CONVERSATION_ENABLED 1
+#else
+#define CONVERSATION_ENABLED 0
+#endif
+
+#ifdef CONFIG_COLLAR_CONVERSATION_TRANSPORT_ENABLE
+#define CONVERSATION_TRANSPORT_ENABLED 1
+#else
+#define CONVERSATION_TRANSPORT_ENABLED 0
+#endif
+
 #define CONVERSATION_SERVICE_STACK_WORDS       6144
 #define CONVERSATION_SERVICE_PRIORITY          8
 #define CONVERSATION_HOST_MAX_LEN              128
@@ -272,7 +284,7 @@ static const char *conversation_stream_state_string(void)
 
 static const char *conversation_service_state_string(void)
 {
-    if (!CONFIG_COLLAR_CONVERSATION_ENABLE) {
+    if (!CONVERSATION_ENABLED) {
         return "disabled";
     }
 
@@ -299,7 +311,7 @@ static const char *conversation_service_state_string(void)
         return "probe_mismatch";
     }
 
-    if (!CONFIG_COLLAR_CONVERSATION_TRANSPORT_ENABLE) {
+    if (!CONVERSATION_TRANSPORT_ENABLED) {
         return "tcp_ready";
     }
 
@@ -1792,7 +1804,7 @@ static void conversation_service_poll_frames(void)
 
 static void conversation_service_transport_tick(void)
 {
-    if (!CONFIG_COLLAR_CONVERSATION_TRANSPORT_ENABLE) {
+    if (!CONVERSATION_TRANSPORT_ENABLED) {
         return;
     }
 
@@ -1866,7 +1878,7 @@ esp_err_t conversation_service_start(void)
     s_conversation.sample_rate = (uint32_t)CONFIG_COLLAR_CONVERSATION_AUDIO_SAMPLE_RATE;
     s_conversation.channels = (uint8_t)CONFIG_COLLAR_CONVERSATION_AUDIO_CHANNELS;
     s_conversation.bit_depth = (uint8_t)CONFIG_COLLAR_CONVERSATION_AUDIO_BIT_DEPTH;
-    s_conversation.configured = CONFIG_COLLAR_CONVERSATION_ENABLE && s_conversation.host[0] != '\0';
+    s_conversation.configured = CONVERSATION_ENABLED && s_conversation.host[0] != '\0';
     conversation_service_reset_stream_state(true);
 
     s_audio_queue = xQueueCreateStatic(
@@ -1898,7 +1910,7 @@ esp_err_t conversation_service_start(void)
 
     s_conversation.started = true;
 
-    if (!CONFIG_COLLAR_CONVERSATION_ENABLE) {
+    if (!CONVERSATION_ENABLED) {
         ESP_LOGI(TAG, "Conversation service disabled by config");
     } else if (!s_conversation.configured) {
         ESP_LOGI(TAG, "Conversation service idle: host not configured");
@@ -1915,7 +1927,7 @@ esp_err_t conversation_service_start(void)
                  conversation_uplink_base64_string(),
                  conversation_downlink_base64_string(),
                  conversation_autodetect_base64_string(),
-                 CONFIG_COLLAR_CONVERSATION_TRANSPORT_ENABLE ? "on" : "off");
+                 CONVERSATION_TRANSPORT_ENABLED ? "on" : "off");
     }
 
     return ESP_OK;

@@ -1,5 +1,6 @@
 #include "bsp/speaker_output.h"
 
+#include <stdint.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -8,8 +9,78 @@
 
 static const char *TAG = "speaker";
 
+#define SPEAKER_BYTES_PER_FRAME                4U
+#define SPEAKER_POSTPROC_CHUNK_BYTES           512U
+#define SPEAKER_HPF_R_Q15                      32440
+#define SPEAKER_OUTPUT_HEADROOM_PCT            82
+#define SPEAKER_SOFT_LIMIT_THRESHOLD           18000
+#define SPEAKER_SOFT_LIMIT_FULL_SCALE          30000
+
+typedef struct {
+    int32_t x_prev[2];
+    int32_t y_prev[2];
+    uint8_t scratch[SPEAKER_POSTPROC_CHUNK_BYTES];
+} speaker_postproc_state_t;
+
 static i2s_chan_handle_t s_tx_chan;
 static bool s_speaker_ready;
+static speaker_postproc_state_t s_postproc;
+
+static int16_t bsp_speaker_soft_limit(int32_t sample)
+{
+    int32_t abs_sample = sample < 0 ? -sample : sample;
+    if (abs_sample <= SPEAKER_SOFT_LIMIT_THRESHOLD) {
+        return (int16_t)sample;
+    }
+
+    const int32_t sign = sample < 0 ? -1 : 1;
+    const int32_t over = abs_sample - SPEAKER_SOFT_LIMIT_THRESHOLD;
+    const int32_t soft_range = SPEAKER_SOFT_LIMIT_FULL_SCALE - SPEAKER_SOFT_LIMIT_THRESHOLD;
+    int32_t limited =
+        SPEAKER_SOFT_LIMIT_THRESHOLD + ((over * soft_range) / (soft_range + over));
+    if (limited > 32767) {
+        limited = 32767;
+    }
+
+    return (int16_t)(sign * limited);
+}
+
+static size_t bsp_speaker_postprocess_chunk(const uint8_t *src, size_t len, uint8_t *dst)
+{
+    if (src == NULL || dst == NULL || len == 0U || (len % SPEAKER_BYTES_PER_FRAME) != 0U) {
+        return 0U;
+    }
+
+    const size_t frame_count = len / SPEAKER_BYTES_PER_FRAME;
+    for (size_t frame = 0; frame < frame_count; ++frame) {
+        for (size_t ch = 0; ch < 2U; ++ch) {
+            const size_t byte_index = (frame * SPEAKER_BYTES_PER_FRAME) + (ch * 2U);
+            int16_t input = (int16_t)((uint16_t)src[byte_index] |
+                                      ((uint16_t)src[byte_index + 1U] << 8));
+
+            /* First-order DC blocker / gentle high-pass to reduce low-frequency mud. */
+            int32_t hp = (int32_t)input - s_postproc.x_prev[ch] +
+                         ((s_postproc.y_prev[ch] * SPEAKER_HPF_R_Q15) >> 15);
+            s_postproc.x_prev[ch] = input;
+            s_postproc.y_prev[ch] = hp;
+
+            /* Reserve headroom because the analog gain is already high (15 dB). */
+            hp = (hp * SPEAKER_OUTPUT_HEADROOM_PCT) / 100;
+
+            if (hp > 32767) {
+                hp = 32767;
+            } else if (hp < -32768) {
+                hp = -32768;
+            }
+
+            const int16_t output = bsp_speaker_soft_limit(hp);
+            dst[byte_index] = (uint8_t)(output & 0xff);
+            dst[byte_index + 1U] = (uint8_t)((output >> 8) & 0xff);
+        }
+    }
+
+    return len;
+}
 
 static esp_err_t bsp_speaker_enable_amp(bool enabled)
 {
@@ -104,15 +175,32 @@ esp_err_t bsp_speaker_init(void)
         return ret;
     }
 
+    memset(&s_postproc, 0, sizeof(s_postproc));
     s_speaker_ready = true;
     ESP_LOGI(TAG,
-             "Speaker output ready: sd=%d dout=%d bclk=%d lrclk=%d rate=%d format=i2s stereo16",
+             "Speaker output ready: sd=%d dout=%d bclk=%d lrclk=%d rate=%d format=i2s stereo16 post=hpf+softlimit headroom=%d%%",
              CONFIG_COLLAR_SPEAKER_SD_MODE_GPIO,
              CONFIG_COLLAR_SPEAKER_DOUT_GPIO,
              CONFIG_COLLAR_SPEAKER_BCLK_GPIO,
              CONFIG_COLLAR_SPEAKER_LRCLK_GPIO,
-             CONFIG_COLLAR_SPEAKER_SAMPLE_RATE);
+             CONFIG_COLLAR_SPEAKER_SAMPLE_RATE,
+             SPEAKER_OUTPUT_HEADROOM_PCT);
     return ESP_OK;
+#endif
+}
+
+void bsp_speaker_deinit(void)
+{
+#if !CONFIG_COLLAR_SPEAKER_ENABLE
+    return;
+#else
+    if (s_tx_chan != NULL) {
+        (void)i2s_channel_disable(s_tx_chan);
+        (void)i2s_del_channel(s_tx_chan);
+        s_tx_chan = NULL;
+    }
+    (void)bsp_speaker_enable_amp(false);
+    s_speaker_ready = false;
 #endif
 }
 
@@ -147,6 +235,46 @@ esp_err_t bsp_speaker_write(const void *data, size_t len, size_t *bytes_written,
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2s_channel_write(s_tx_chan, data, len, bytes_written, timeout_ms);
+    if ((len % SPEAKER_BYTES_PER_FRAME) != 0U) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    size_t total_written = 0U;
+    const uint8_t *src = (const uint8_t *)data;
+    while (total_written < len) {
+        size_t chunk_len = len - total_written;
+        if (chunk_len > sizeof(s_postproc.scratch)) {
+            chunk_len = sizeof(s_postproc.scratch);
+        }
+        chunk_len = (chunk_len / SPEAKER_BYTES_PER_FRAME) * SPEAKER_BYTES_PER_FRAME;
+        if (chunk_len == 0U) {
+            break;
+        }
+
+        size_t processed_len = bsp_speaker_postprocess_chunk(
+            src + total_written, chunk_len, s_postproc.scratch);
+        if (processed_len == 0U) {
+            break;
+        }
+
+        size_t chunk_written = 0U;
+        esp_err_t ret = i2s_channel_write(
+            s_tx_chan, s_postproc.scratch, processed_len, &chunk_written, timeout_ms);
+        total_written += chunk_written;
+        if (ret != ESP_OK) {
+            if (bytes_written != NULL) {
+                *bytes_written = total_written;
+            }
+            return ret;
+        }
+        if (chunk_written != processed_len) {
+            break;
+        }
+    }
+
+    if (bytes_written != NULL) {
+        *bytes_written = total_written;
+    }
+    return total_written == len ? ESP_OK : ESP_ERR_TIMEOUT;
 #endif
 }

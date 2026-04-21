@@ -33,7 +33,7 @@ static const char *TAG = "mic";
 #define BSP_MIC_TASK_PRIORITY           5U
 #define BSP_MIC_DC_ALPHA_Q15            32604
 #define BSP_MIC_OVERFLOW_LOG_PERIOD_US  1000000LL
-#define BSP_MIC_DIAG_LOG_PERIOD_US      1000000LL
+#define BSP_MIC_DIAG_LOG_PERIOD_US      3000000LL
 #define BSP_MIC_YIELD_EVERY_LOOPS       8U
 #define BSP_MIC_PREVIEW_BYTES           8U
 #define BSP_MIC_PREVIEW_SAMPLES         8U
@@ -320,34 +320,6 @@ static void mic_accumulate_pcm_diag(microphone_lane_state_t *lane, const int16_t
     lane->diag_pcm_samples += (uint32_t)pcm_count;
 }
 
-static void mic_copy_byte_preview(uint8_t *dst, uint32_t *dst_len,
-                                  const uint8_t *src, size_t src_len)
-{
-    size_t preview_len = src_len;
-    if (preview_len > BSP_MIC_PREVIEW_BYTES) {
-        preview_len = BSP_MIC_PREVIEW_BYTES;
-    }
-
-    *dst_len = (uint32_t)preview_len;
-    for (size_t i = 0; i < preview_len; ++i) {
-        dst[i] = src[i];
-    }
-}
-
-static void mic_copy_pcm_preview(int16_t *dst, uint32_t *dst_len,
-                                 const int16_t *src, size_t src_len)
-{
-    size_t preview_len = src_len;
-    if (preview_len > BSP_MIC_PREVIEW_SAMPLES) {
-        preview_len = BSP_MIC_PREVIEW_SAMPLES;
-    }
-
-    *dst_len = (uint32_t)preview_len;
-    for (size_t i = 0; i < preview_len; ++i) {
-        dst[i] = src[i];
-    }
-}
-
 static size_t mic_normalize_i2s_words_to_raw_bytes(const uint8_t *i2s_bytes,
                                                    size_t i2s_len,
                                                    uint8_t *raw_bytes,
@@ -361,7 +333,10 @@ static size_t mic_normalize_i2s_words_to_raw_bytes(const uint8_t *i2s_bytes,
     return normalized;
 }
 
-static void mic_log_mono_flow_diag(const microphone_lane_state_t *lane)
+static void mic_log_mono_flow_diag(const microphone_lane_state_t *lane,
+                                   uint32_t ones_permille,
+                                   uint32_t edge_permille,
+                                   uint32_t pcm_avg_abs)
 {
     uint32_t spaces = 0U;
     UBaseType_t stack_words = 0U;
@@ -373,49 +348,54 @@ static void mic_log_mono_flow_diag(const microphone_lane_state_t *lane)
     }
 
     ESP_LOGI(TAG,
-             "Mic flow: loops=%u i2s_reads=%u i2s_bytes=%u last_i2s=%u short=%u zero=%u odd=%u raw_trunc=%u pcm_zero=%u last_raw=%u last_pcm=%u stream_free=%u stack_hwm=%u",
-             (unsigned int)s_mic.diag_capture_loops,
-             (unsigned int)s_mic.diag_i2s_reads,
-             (unsigned int)s_mic.diag_i2s_bytes,
+             "Mic health: backend=i2s-raw slot=%s raw=%uB pcm=%u ones=%u.%u%% edges=%u.%u%% avg=%u peak=%u i2s(last=%uB short=%u zero=%u odd=%u) path(raw_trunc=%u pcm_zero=%u stream_free=%u stack_hwm=%u)",
+#ifdef CONFIG_COLLAR_MICROPHONE_LR_HIGH
+             "right",
+#else
+             "left",
+#endif
+             (unsigned int)lane->diag_raw_bytes,
+             (unsigned int)lane->diag_pcm_samples,
+             (unsigned int)(ones_permille / 10U),
+             (unsigned int)(ones_permille % 10U),
+             (unsigned int)(edge_permille / 10U),
+             (unsigned int)(edge_permille % 10U),
+             (unsigned int)pcm_avg_abs,
+             (unsigned int)lane->diag_pcm_peak,
              (unsigned int)s_mic.diag_last_i2s_bytes,
              (unsigned int)s_mic.diag_i2s_short_reads,
              (unsigned int)s_mic.diag_i2s_zero_reads,
              (unsigned int)s_mic.diag_i2s_odd_reads,
              (unsigned int)s_mic.diag_raw_truncated_blocks,
              (unsigned int)s_mic.diag_pcm_zero_blocks,
-             (unsigned int)s_mic.diag_last_raw_bytes,
-             (unsigned int)s_mic.diag_last_pcm_samples,
              (unsigned int)spaces,
              (unsigned int)stack_words);
 
-    ESP_LOGI(TAG,
-             "Mic preview: i2s=%02x %02x %02x %02x %02x %02x %02x %02x raw=%02x %02x %02x %02x %02x %02x %02x %02x pcm=%d %d %d %d %d %d %d %d",
-             s_mic.diag_last_i2s_preview_len > 0U ? s_mic.diag_last_i2s_preview[0] : 0U,
-             s_mic.diag_last_i2s_preview_len > 1U ? s_mic.diag_last_i2s_preview[1] : 0U,
-             s_mic.diag_last_i2s_preview_len > 2U ? s_mic.diag_last_i2s_preview[2] : 0U,
-             s_mic.diag_last_i2s_preview_len > 3U ? s_mic.diag_last_i2s_preview[3] : 0U,
-             s_mic.diag_last_i2s_preview_len > 4U ? s_mic.diag_last_i2s_preview[4] : 0U,
-             s_mic.diag_last_i2s_preview_len > 5U ? s_mic.diag_last_i2s_preview[5] : 0U,
-             s_mic.diag_last_i2s_preview_len > 6U ? s_mic.diag_last_i2s_preview[6] : 0U,
-             s_mic.diag_last_i2s_preview_len > 7U ? s_mic.diag_last_i2s_preview[7] : 0U,
-             s_mic.diag_last_raw_preview_len > 0U ? s_mic.diag_last_raw_preview[0] : 0U,
-             s_mic.diag_last_raw_preview_len > 1U ? s_mic.diag_last_raw_preview[1] : 0U,
-             s_mic.diag_last_raw_preview_len > 2U ? s_mic.diag_last_raw_preview[2] : 0U,
-             s_mic.diag_last_raw_preview_len > 3U ? s_mic.diag_last_raw_preview[3] : 0U,
-             s_mic.diag_last_raw_preview_len > 4U ? s_mic.diag_last_raw_preview[4] : 0U,
-             s_mic.diag_last_raw_preview_len > 5U ? s_mic.diag_last_raw_preview[5] : 0U,
-             s_mic.diag_last_raw_preview_len > 6U ? s_mic.diag_last_raw_preview[6] : 0U,
-             s_mic.diag_last_raw_preview_len > 7U ? s_mic.diag_last_raw_preview[7] : 0U,
-             s_mic.diag_last_pcm_preview_len > 0U ? (int)s_mic.diag_last_pcm_preview[0] : 0,
-             s_mic.diag_last_pcm_preview_len > 1U ? (int)s_mic.diag_last_pcm_preview[1] : 0,
-             s_mic.diag_last_pcm_preview_len > 2U ? (int)s_mic.diag_last_pcm_preview[2] : 0,
-             s_mic.diag_last_pcm_preview_len > 3U ? (int)s_mic.diag_last_pcm_preview[3] : 0,
-             s_mic.diag_last_pcm_preview_len > 4U ? (int)s_mic.diag_last_pcm_preview[4] : 0,
-             s_mic.diag_last_pcm_preview_len > 5U ? (int)s_mic.diag_last_pcm_preview[5] : 0,
-             s_mic.diag_last_pcm_preview_len > 6U ? (int)s_mic.diag_last_pcm_preview[6] : 0,
-             s_mic.diag_last_pcm_preview_len > 7U ? (int)s_mic.diag_last_pcm_preview[7] : 0);
-
     (void)lane;
+}
+
+static void mic_log_stereo_flow_diag(const microphone_lane_state_t *left,
+                                     const microphone_lane_state_t *right)
+{
+    uint32_t spaces = 0U;
+    UBaseType_t stack_words = 0U;
+    if (s_mic.pcm_stream != NULL) {
+        spaces = (uint32_t)xStreamBufferSpacesAvailable(s_mic.pcm_stream);
+    }
+    if (s_mic.task != NULL) {
+        stack_words = uxTaskGetStackHighWaterMark(s_mic.task);
+    }
+
+    ESP_LOGI(TAG,
+             "Mic health: backend=spi-pdm stereo raw_clk=%uHz L(avg=%u peak=%u) R(avg=%u peak=%u) stream_free=%u stack_hwm=%u loops=%u",
+             (unsigned int)s_mic.capture_clock_hz,
+             (unsigned int)(left->diag_pcm_samples == 0U ? 0U : (uint32_t)(left->diag_pcm_abs_sum / left->diag_pcm_samples)),
+             (unsigned int)left->diag_pcm_peak,
+             (unsigned int)(right->diag_pcm_samples == 0U ? 0U : (uint32_t)(right->diag_pcm_abs_sum / right->diag_pcm_samples)),
+             (unsigned int)right->diag_pcm_peak,
+             (unsigned int)spaces,
+             (unsigned int)stack_words,
+             (unsigned int)s_mic.diag_capture_loops);
 }
 
 static void mic_log_diag_if_due(void)
@@ -444,24 +424,21 @@ static void mic_log_diag_if_due(void)
             (uint32_t)(right->diag_pcm_abs_sum / right->diag_pcm_samples);
 
         ESP_LOGI(TAG,
-                 "Mic diag: stereo raw_clk=%uHz L(raw_blocks=%u ones=%u.%u%% edges=%u.%u%% pcm=%u avg=%u peak=%u) R(raw_blocks=%u ones=%u.%u%% edges=%u.%u%% pcm=%u avg=%u peak=%u)",
+                 "Mic diag: stereo raw_clk=%uHz L(ones=%u.%u%% edges=%u.%u%% avg=%u peak=%u) R(ones=%u.%u%% edges=%u.%u%% avg=%u peak=%u)",
                  (unsigned int)s_mic.capture_clock_hz,
-                 (unsigned int)left->diag_raw_blocks,
                  (unsigned int)(left_ones_permille / 10U),
                  (unsigned int)(left_ones_permille % 10U),
                  (unsigned int)(left_edge_permille / 10U),
                  (unsigned int)(left_edge_permille % 10U),
-                 (unsigned int)left->diag_pcm_samples,
                  (unsigned int)left_avg_abs,
                  (unsigned int)left->diag_pcm_peak,
-                 (unsigned int)right->diag_raw_blocks,
                  (unsigned int)(right_ones_permille / 10U),
                  (unsigned int)(right_ones_permille % 10U),
                  (unsigned int)(right_edge_permille / 10U),
                  (unsigned int)(right_edge_permille % 10U),
-                 (unsigned int)right->diag_pcm_samples,
                  (unsigned int)right_avg_abs,
                  (unsigned int)right->diag_pcm_peak);
+        mic_log_stereo_flow_diag(left, right);
     } else {
         const microphone_lane_state_t *lane = &s_mic.lane[BSP_MIC_MONO_LANE_INDEX];
         uint32_t total_bits = lane->diag_raw_bits;
@@ -472,29 +449,7 @@ static void mic_log_diag_if_due(void)
         uint32_t pcm_avg_abs = lane->diag_pcm_samples == 0U ? 0U :
             (uint32_t)(lane->diag_pcm_abs_sum / lane->diag_pcm_samples);
 
-        ESP_LOGI(TAG,
-                 "Mic diag: raw_blocks=%u raw_bytes=%u pdm_ones=%u.%u%% pdm_edges=%u.%u%% pcm_samples=%u pcm_avg_abs=%u pcm_peak=%u backend=%s slot=%s",
-                 (unsigned int)lane->diag_raw_blocks,
-                 (unsigned int)lane->diag_raw_bytes,
-                 (unsigned int)(ones_permille / 10U),
-                 (unsigned int)(ones_permille % 10U),
-                 (unsigned int)(edge_permille / 10U),
-                 (unsigned int)(edge_permille % 10U),
-                 (unsigned int)lane->diag_pcm_samples,
-                 (unsigned int)pcm_avg_abs,
-                 (unsigned int)lane->diag_pcm_peak,
-#if CONFIG_COLLAR_MICROPHONE_STEREO
-                 "spi-shared"
-#else
-                 "i2s-raw"
-#endif
-#ifdef CONFIG_COLLAR_MICROPHONE_LR_HIGH
-                 , "right"
-#else
-                 , "left"
-#endif
-        );
-        mic_log_mono_flow_diag(lane);
+        mic_log_mono_flow_diag(lane, ones_permille, edge_permille, pcm_avg_abs);
     }
 
     for (uint32_t i = 0; i < BSP_MIC_CAPTURE_LANE_COUNT; ++i) {
@@ -576,6 +531,7 @@ static void mic_capture_task(void *arg)
                          esp_err_to_name(ret));
                 s_microphone_ready = false;
                 s_mic.task_running = false;
+                s_mic.task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -626,6 +582,7 @@ static void mic_capture_task(void *arg)
                 ESP_LOGE(TAG, "I2S raw microphone capture stopped: %s", esp_err_to_name(ret));
                 s_microphone_ready = false;
                 s_mic.task_running = false;
+                s_mic.task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -633,8 +590,6 @@ static void mic_capture_task(void *arg)
             s_mic.diag_i2s_reads++;
             s_mic.diag_i2s_bytes += (uint32_t)captured_bytes;
             s_mic.diag_last_i2s_bytes = (uint32_t)captured_bytes;
-            mic_copy_byte_preview(s_mic.diag_last_i2s_preview, &s_mic.diag_last_i2s_preview_len,
-                                  s_mic.rx_dma[lane_index], captured_bytes);
             if (captured_bytes == 0U) {
                 s_mic.diag_i2s_zero_reads++;
             }
@@ -649,8 +604,6 @@ static void mic_capture_task(void *arg)
                 (const uint8_t *)s_mic.rx_dma[lane_index], captured_bytes,
                 s_mic.raw_pdm_bytes, sizeof(s_mic.raw_pdm_bytes));
             s_mic.diag_last_raw_bytes = (uint32_t)raw_len;
-            mic_copy_byte_preview(s_mic.diag_last_raw_preview, &s_mic.diag_last_raw_preview_len,
-                                  s_mic.raw_pdm_bytes, raw_len);
             if (raw_len < captured_bytes) {
                 s_mic.diag_raw_truncated_blocks++;
             }
@@ -663,8 +616,6 @@ static void mic_capture_task(void *arg)
                 s_mic.decimation, s_mic.lane_pcm[lane_index],
                 sizeof(s_mic.lane_pcm[lane_index]) / sizeof(s_mic.lane_pcm[lane_index][0]));
             s_mic.diag_last_pcm_samples = (uint32_t)pcm_count;
-            mic_copy_pcm_preview(s_mic.diag_last_pcm_preview, &s_mic.diag_last_pcm_preview_len,
-                                 s_mic.lane_pcm[lane_index], pcm_count);
             if (pcm_count == 0U) {
                 s_mic.diag_pcm_zero_blocks++;
             }
@@ -700,6 +651,7 @@ static void mic_capture_task(void *arg)
         }
     }
 
+    s_mic.task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -738,6 +690,33 @@ static void mic_cleanup_on_error(void)
 }
 #endif
 
+void bsp_microphone_deinit(void)
+{
+#if !CONFIG_COLLAR_MICROPHONE_ENABLE
+    return;
+#else
+    s_microphone_ready = false;
+    s_mic.task_running = false;
+
+    if (s_mic.i2s_rx != NULL) {
+        (void)i2s_channel_disable(s_mic.i2s_rx);
+    }
+
+    const int64_t deadline_us = esp_timer_get_time() + 200000LL;
+    while (s_mic.task != NULL && esp_timer_get_time() < deadline_us) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (s_mic.task != NULL) {
+        vTaskDelete(s_mic.task);
+        s_mic.task = NULL;
+    }
+
+    mic_cleanup_on_error();
+    memset(&s_mic, 0, sizeof(s_mic));
+#endif
+}
+
 esp_err_t bsp_microphone_init(void)
 {
 #if !CONFIG_COLLAR_MICROPHONE_ENABLE
@@ -768,8 +747,8 @@ esp_err_t bsp_microphone_init(void)
     }
 
 #if !CONFIG_COLLAR_MICROPHONE_STEREO && CONFIG_COLLAR_SPEAKER_ENABLE
-    ESP_LOGW(TAG,
-             "Mono microphone uses I2S RX; if speaker output is also enabled on ESP32-C3, I2S resource conflicts can block capture");
+    ESP_LOGI(TAG,
+             "Microphone RX and speaker TX share the ESP32-C3 I2S peripheral; duplex is allowed, but monitor audio load under stress");
 #endif
 
 #if !CONFIG_COLLAR_MICROPHONE_STEREO

@@ -16,6 +16,18 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
+#ifdef CONFIG_COLLAR_CLOUD_PROBE_ENABLE
+#define CLOUD_PROBE_ENABLED 1
+#else
+#define CLOUD_PROBE_ENABLED 0
+#endif
+
+#ifdef CONFIG_COLLAR_CONVERSATION_ENABLE
+#define CLOUD_CONVERSATION_ENABLED 1
+#else
+#define CLOUD_CONVERSATION_ENABLED 0
+#endif
+
 #define CLOUD_SERVICE_STACK_WORDS      3072
 #define CLOUD_SERVICE_PRIORITY         8
 #define CLOUD_SERVICE_HOST_MAX_LEN     128
@@ -200,7 +212,7 @@ static void cloud_service_task(void *arg)
     (void)arg;
 
     for (;;) {
-        if (!CONFIG_COLLAR_CLOUD_PROBE_ENABLE) {
+        if (!CLOUD_PROBE_ENABLED) {
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
@@ -242,16 +254,16 @@ esp_err_t cloud_service_start(void)
     strlcpy(s_cloud.host, CONFIG_COLLAR_CLOUD_HOST, sizeof(s_cloud.host));
     s_cloud.port = (uint16_t)CONFIG_COLLAR_CLOUD_PORT;
 
-    if (CONFIG_COLLAR_CLOUD_PROBE_ENABLE &&
+    if (CLOUD_PROBE_ENABLED &&
         s_cloud.host[0] == '\0' &&
-        CONFIG_COLLAR_CONVERSATION_ENABLE &&
+        CLOUD_CONVERSATION_ENABLED &&
         CONFIG_COLLAR_CONVERSATION_HOST[0] != '\0') {
         strlcpy(s_cloud.host, CONFIG_COLLAR_CONVERSATION_HOST, sizeof(s_cloud.host));
         s_cloud.port = (uint16_t)CONFIG_COLLAR_CONVERSATION_PORT;
         s_cloud.using_fallback_target = true;
     }
 
-    s_cloud.configured = CONFIG_COLLAR_CLOUD_PROBE_ENABLE && s_cloud.host[0] != '\0';
+    s_cloud.configured = CLOUD_PROBE_ENABLED && s_cloud.host[0] != '\0';
 
     TaskHandle_t task_handle = xTaskCreateStaticPinnedToCore(
         cloud_service_task,
@@ -268,7 +280,7 @@ esp_err_t cloud_service_start(void)
 
     s_cloud.started = true;
 
-    if (!CONFIG_COLLAR_CLOUD_PROBE_ENABLE) {
+    if (!CLOUD_PROBE_ENABLED) {
         ESP_LOGI(TAG, "Cloud probe disabled by config");
     } else if (!s_cloud.configured) {
         ESP_LOGI(TAG, "Cloud probe idle: host not configured");
@@ -309,7 +321,7 @@ void cloud_service_log_status(void)
 {
     const char *state;
 
-    if (!CONFIG_COLLAR_CLOUD_PROBE_ENABLE) {
+    if (!CLOUD_PROBE_ENABLED) {
         state = "disabled";
     } else if (!s_cloud.configured) {
         state = "unconfigured";

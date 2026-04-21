@@ -7,6 +7,7 @@
 #include "esp_err.h"
 
 esp_err_t bsp_microphone_init(void);
+void bsp_microphone_deinit(void);
 bool bsp_microphone_is_ready(void);
 uint32_t bsp_microphone_get_sample_rate_hz(void);
 uint8_t bsp_microphone_get_channels(void);
