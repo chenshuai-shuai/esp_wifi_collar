@@ -20,7 +20,7 @@ static const char *TAG = "mic";
 #if CONFIG_COLLAR_MICROPHONE_ENABLE
 #define BSP_MIC_SPI_HOST                SPI2_HOST
 #define BSP_MIC_RAW_BYTES               2048U
-#define BSP_MIC_STREAM_BUFFER_MS        250U
+#define BSP_MIC_STREAM_BUFFER_MS        750U
 #define BSP_MIC_STREAM_BUFFER_MAX_BYTES (48U * 1024U)
 #define BSP_MIC_MIN_DECIMATION          64U
 #define BSP_MIC_PCM_SAMPLES_PER_BLOCK   ((BSP_MIC_RAW_BYTES * 8U) / BSP_MIC_MIN_DECIMATION)
@@ -30,7 +30,7 @@ static const char *TAG = "mic";
 #define BSP_MIC_MAX_PDM_CLOCK_HZ        3300000U
 #define BSP_MIC_WARMUP_MS               25U
 #define BSP_MIC_TASK_STACK_WORDS        6144U
-#define BSP_MIC_TASK_PRIORITY           5U
+#define BSP_MIC_TASK_PRIORITY           4U
 #define BSP_MIC_DC_ALPHA_Q15            32604
 #define BSP_MIC_OVERFLOW_LOG_PERIOD_US  1000000LL
 #define BSP_MIC_DIAG_LOG_PERIOD_US      3000000LL
@@ -103,6 +103,12 @@ typedef struct {
 
 static microphone_state_t s_mic;
 static bool s_microphone_ready;
+
+static TickType_t mic_delay_ticks(uint32_t ms)
+{
+    TickType_t t = pdMS_TO_TICKS(ms);
+    return (t == 0) ? 1 : t;
+}
 
 static inline int16_t mic_clip_s16(int32_t sample)
 {
@@ -571,8 +577,14 @@ static void mic_capture_task(void *arg)
                 }
 
                 size_t pcm_bytes = frame_count * 2U * sizeof(int16_t);
-                size_t sent = xStreamBufferSend(s_mic.pcm_stream, s_mic.stereo_pcm, pcm_bytes, 0);
+                size_t sent = xStreamBufferSend(
+                    s_mic.pcm_stream, s_mic.stereo_pcm, pcm_bytes, mic_delay_ticks(20U));
                 mic_report_overflow(pcm_bytes, sent);
+                if (sent < pcm_bytes) {
+                    /* Downstream congested: yield real time so IDLE/Wi-Fi/feed tasks
+                     * can run and recover, instead of hot-spinning mic_capture. */
+                    vTaskDelay(1);
+                }
             }
         } else {
             const uint32_t lane_index = BSP_MIC_MONO_LANE_INDEX;
@@ -623,9 +635,12 @@ static void mic_capture_task(void *arg)
 
             if (pcm_count > 0U) {
                 size_t pcm_bytes = pcm_count * sizeof(int16_t);
-                size_t sent =
-                    xStreamBufferSend(s_mic.pcm_stream, s_mic.lane_pcm[lane_index], pcm_bytes, 0);
+                size_t sent = xStreamBufferSend(
+                    s_mic.pcm_stream, s_mic.lane_pcm[lane_index], pcm_bytes, mic_delay_ticks(20U));
                 mic_report_overflow(pcm_bytes, sent);
+                if (sent < pcm_bytes) {
+                    vTaskDelay(1);
+                }
             }
 
             const int64_t now_us = esp_timer_get_time();

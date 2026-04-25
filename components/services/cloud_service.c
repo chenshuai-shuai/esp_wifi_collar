@@ -22,11 +22,6 @@
 #define CLOUD_PROBE_ENABLED 0
 #endif
 
-#ifdef CONFIG_COLLAR_CONVERSATION_ENABLE
-#define CLOUD_CONVERSATION_ENABLED 1
-#else
-#define CLOUD_CONVERSATION_ENABLED 0
-#endif
 
 #define CLOUD_SERVICE_STACK_WORDS      3072
 #define CLOUD_SERVICE_PRIORITY         8
@@ -42,7 +37,6 @@ typedef struct {
     bool configured;
     bool reachable;
     bool dns_resolved;
-    bool using_fallback_target;
     uint16_t port;
     uint32_t success_count;
     uint32_t failure_count;
@@ -254,15 +248,6 @@ esp_err_t cloud_service_start(void)
     strlcpy(s_cloud.host, CONFIG_COLLAR_CLOUD_HOST, sizeof(s_cloud.host));
     s_cloud.port = (uint16_t)CONFIG_COLLAR_CLOUD_PORT;
 
-    if (CLOUD_PROBE_ENABLED &&
-        s_cloud.host[0] == '\0' &&
-        CLOUD_CONVERSATION_ENABLED &&
-        CONFIG_COLLAR_CONVERSATION_HOST[0] != '\0') {
-        strlcpy(s_cloud.host, CONFIG_COLLAR_CONVERSATION_HOST, sizeof(s_cloud.host));
-        s_cloud.port = (uint16_t)CONFIG_COLLAR_CONVERSATION_PORT;
-        s_cloud.using_fallback_target = true;
-    }
-
     s_cloud.configured = CLOUD_PROBE_ENABLED && s_cloud.host[0] != '\0';
 
     TaskHandle_t task_handle = xTaskCreateStaticPinnedToCore(
@@ -285,11 +270,10 @@ esp_err_t cloud_service_start(void)
     } else if (!s_cloud.configured) {
         ESP_LOGI(TAG, "Cloud probe idle: host not configured");
     } else {
-        ESP_LOGI(TAG, "Cloud probe armed: host=%s port=%u interval=%d s timeout=%d ms source=%s",
+        ESP_LOGI(TAG, "Cloud probe armed: host=%s port=%u interval=%d s timeout=%d ms",
                  s_cloud.host, (unsigned int)s_cloud.port,
                  CONFIG_COLLAR_CLOUD_PROBE_INTERVAL_SEC,
-                 CONFIG_COLLAR_CLOUD_CONNECT_TIMEOUT_MS,
-                 s_cloud.using_fallback_target ? "conversation_default" : "cloud_config");
+                 CONFIG_COLLAR_CLOUD_CONNECT_TIMEOUT_MS);
     }
 
     return ESP_OK;
@@ -336,7 +320,7 @@ void cloud_service_log_status(void)
     }
 
     ESP_LOGI(TAG,
-             "Cloud status: state=%s host=%s port=%u addr=%s wifi=%s ok=%lu fail=%lu err=%s source=%s",
+             "Cloud status: state=%s host=%s port=%u addr=%s wifi=%s ok=%lu fail=%lu err=%s",
              state,
              s_cloud.host[0] != '\0' ? s_cloud.host : "-",
              (unsigned int)s_cloud.port,
@@ -344,8 +328,7 @@ void cloud_service_log_status(void)
              s_cloud.wifi_ready ? "ready" : "no",
              (unsigned long)s_cloud.success_count,
              (unsigned long)s_cloud.failure_count,
-             s_cloud.last_error[0] != '\0' ? s_cloud.last_error : "-",
-             s_cloud.using_fallback_target ? "conversation_default" : "cloud_config");
+             s_cloud.last_error[0] != '\0' ? s_cloud.last_error : "-");
 }
 
 bool cloud_service_is_reachable(void)

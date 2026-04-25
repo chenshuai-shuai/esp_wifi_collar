@@ -1,0 +1,6 @@
+## conversation - gRPC client over manual HTTP/2 (h2c, plaintext) + nanopb
+##
+## Talks to the cloud traini.ConversationService over HTTP/2 cleartext, matching
+## the Android companion app's ManagedChannelBuilder.usePlaintext().
+dependencies:
+  livekit/nanopb: "^0.4.9"

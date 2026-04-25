@@ -1,0 +1,17 @@
+dependencies:
+  idf:
+    source:
+      type: idf
+    version: 5.4.0
+  livekit/nanopb:
+    component_hash: 5b3bd915d2eb2ad1a7bb4a3ca655c40f31bab5f4f48e75ec04e300dc9ab78f4d
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.4.9
+direct_dependencies:
+- livekit/nanopb
+manifest_hash: 02361b9d88304f7898c0655729c243856c3a74ce0d86ff45bf6797c64c2bedf3
+target: esp32c3
+version: 2.0.0

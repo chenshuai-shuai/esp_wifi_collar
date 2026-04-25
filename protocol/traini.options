@@ -1,0 +1,14 @@
+# nanopb options for traini.proto
+# We use dynamic callbacks for large bytes fields (audio_data) to avoid
+# big static buffers. Strings use reasonable fixed upper bounds.
+
+traini.AudioChunk.audio_data       type:FT_CALLBACK
+traini.AudioOutput.audio_data      type:FT_CALLBACK
+
+traini.AudioFormat.encoding        max_size:16
+
+traini.ErrorEvent.code             max_size:32
+traini.ErrorEvent.message          max_size:128
+
+traini.EndConversationRequest.session_id  max_size:80
+traini.SessionSummary.session_id          max_size:80

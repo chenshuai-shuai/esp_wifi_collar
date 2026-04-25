@@ -7,6 +7,7 @@
 
 esp_err_t wifi_service_start(void);
 esp_err_t wifi_service_request_reprovision(void);
+esp_err_t wifi_service_set_realtime_mode(bool enabled);
 void wifi_service_log_status(void);
 bool wifi_service_sta_ready(void);
 const char *wifi_service_sta_ip(void);

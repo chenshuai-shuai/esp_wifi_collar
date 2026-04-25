@@ -1,0 +1,10 @@
+## proto_gen - generated nanopb stubs for protocol/traini.proto
+##
+## Regenerate (from repo root) after changing traini.proto or traini.options:
+##   protoc --nanopb_out=components/proto_gen \
+##          --proto_path=protocol protocol/traini.proto
+##
+## The nanopb runtime is pulled in via the livekit/nanopb managed component.
+
+dependencies:
+  livekit/nanopb: "^0.4.9"

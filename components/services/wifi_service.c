@@ -36,8 +36,10 @@
 #define WIFI_AP_MAX_CONNECTIONS         4
 #define WIFI_AP_IP_STR_LEN              16
 #define WIFI_STA_IP_STR_LEN             16
-#define WIFI_PORTAL_TX_POWER_QUARTER_DBM 40
-#define WIFI_PORTAL_LISTEN_INTERVAL     10
+#define WIFI_PORTAL_TX_POWER_QUARTER_DBM     40
+#define WIFI_CONV_TX_POWER_QUARTER_DBM       52
+#define WIFI_PORTAL_LISTEN_INTERVAL          10
+#define WIFI_CONV_LISTEN_INTERVAL            1
 
 static const char *TAG = "wifi_svc";
 
@@ -106,6 +108,7 @@ typedef struct {
     char sta_password[65];
     char sta_ip[WIFI_STA_IP_STR_LEN];
     char last_error[96];
+    bool realtime_mode;
 } wifi_service_state_t;
 
 static wifi_service_state_t s_wifi;
@@ -145,16 +148,42 @@ void wifi_service_log_status(void)
         }
     }
 
+    /* Only promote to INFO when the "interesting" shape of the status
+     * changed (state/ready/portal/ssid/ip). Periodic identical status
+     * lines are demoted to DEBUG so the monitor isn't spammed during
+     * steady state. Errors/warnings in the Wi-Fi driver still log on
+     * their own, so this silence is safe. */
+    static char s_last_sig[160];
+    char sig[160];
+    snprintf(sig, sizeof(sig), "%s|%s|%s|%s|%s",
+             state, link_ready, portal, ssid, ip);
+    const bool changed = (strcmp(sig, s_last_sig) != 0);
+    if (changed) strlcpy(s_last_sig, sig, sizeof(s_last_sig));
+
+#define WIFI_STATUS_FMT_RSSI \
+    "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s rssi=%d retries=%u"
+#define WIFI_STATUS_FMT_NORSSI \
+    "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s retries=%u"
+
     if (ap_info_ret == ESP_OK) {
-        ESP_LOGI(TAG,
-                 "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s rssi=%d retries=%u",
-                 state, link_ready, portal, ssid, ip, rssi, (unsigned int)s_wifi.retry_count);
+        if (changed)
+            ESP_LOGI(TAG, WIFI_STATUS_FMT_RSSI,
+                     state, link_ready, portal, ssid, ip, rssi, (unsigned int)s_wifi.retry_count);
+        else
+            ESP_LOGD(TAG, WIFI_STATUS_FMT_RSSI,
+                     state, link_ready, portal, ssid, ip, rssi, (unsigned int)s_wifi.retry_count);
     } else {
-        ESP_LOGI(TAG,
-                 "Wi-Fi status: state=%s ready=%s portal=%s ssid=%s ip=%s retries=%u",
-                 state, link_ready, portal, ssid, ip, (unsigned int)s_wifi.retry_count);
+        if (changed)
+            ESP_LOGI(TAG, WIFI_STATUS_FMT_NORSSI,
+                     state, link_ready, portal, ssid, ip, (unsigned int)s_wifi.retry_count);
+        else
+            ESP_LOGD(TAG, WIFI_STATUS_FMT_NORSSI,
+                     state, link_ready, portal, ssid, ip, (unsigned int)s_wifi.retry_count);
     }
+#undef WIFI_STATUS_FMT_RSSI
+#undef WIFI_STATUS_FMT_NORSSI
 }
+
 
 bool wifi_service_sta_ready(void)
 {
@@ -356,7 +385,9 @@ static void wifi_service_apply_low_power_profile(wifi_mode_t mode)
     }
 
     if (mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA) {
-        ret = esp_wifi_set_ps(WIFI_PS_MAX_MODEM);
+        const wifi_ps_type_t ps = s_wifi.realtime_mode
+            ? WIFI_PS_MIN_MODEM : WIFI_PS_MAX_MODEM;
+        ret = esp_wifi_set_ps(ps);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Failed to set STA power save: %s", esp_err_to_name(ret));
         }
@@ -367,12 +398,16 @@ static void wifi_service_apply_low_power_profile(wifi_mode_t mode)
         }
     }
 
-    ret = esp_wifi_set_max_tx_power(WIFI_PORTAL_TX_POWER_QUARTER_DBM);
+    const int8_t tx_quarter_dbm = s_wifi.realtime_mode
+        ? WIFI_CONV_TX_POWER_QUARTER_DBM : WIFI_PORTAL_TX_POWER_QUARTER_DBM;
+    ret = esp_wifi_set_max_tx_power(tx_quarter_dbm);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to reduce Wi-Fi TX power: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGI(TAG, "Wi-Fi TX power limited to %.2f dBm for provisioning",
-                 WIFI_PORTAL_TX_POWER_QUARTER_DBM / 4.0f);
+        ESP_LOGI(TAG, "Wi-Fi power profile: mode=%s ps=%s tx=%.2f dBm",
+                 s_wifi.realtime_mode ? "realtime" : "idle",
+                 s_wifi.realtime_mode ? "MIN_MODEM" : "MAX_MODEM",
+                 tx_quarter_dbm / 4.0f);
     }
 }
 
@@ -509,7 +544,8 @@ static esp_err_t wifi_service_connect_sta(void)
     strlcpy((char *)sta_config.sta.ssid, s_wifi.sta_ssid, sizeof(sta_config.sta.ssid));
     strlcpy((char *)sta_config.sta.password, s_wifi.sta_password, sizeof(sta_config.sta.password));
     sta_config.sta.failure_retry_cnt = 0;
-    sta_config.sta.listen_interval = WIFI_PORTAL_LISTEN_INTERVAL;
+    sta_config.sta.listen_interval = s_wifi.realtime_mode
+        ? WIFI_CONV_LISTEN_INTERVAL : WIFI_PORTAL_LISTEN_INTERVAL;
     sta_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     sta_config.sta.pmf_cfg.capable = true;
     sta_config.sta.pmf_cfg.required = false;
@@ -533,8 +569,33 @@ static esp_err_t wifi_service_connect_sta(void)
     esp_wifi_disconnect();
     ESP_RETURN_ON_ERROR(esp_wifi_connect(), TAG, "Failed to begin STA connect");
 
-    ESP_LOGI(TAG, "Connecting to Wi-Fi ssid=%s", s_wifi.sta_ssid);
+    ESP_LOGI(TAG, "Connecting to Wi-Fi ssid=%s (listen_interval=%u profile=%s)",
+             s_wifi.sta_ssid,
+             (unsigned)sta_config.sta.listen_interval,
+             s_wifi.realtime_mode ? "realtime" : "idle");
     (void)wifi_service_publish_state(KERNEL_WIFI_STATE_CONNECTING);
+    return ESP_OK;
+}
+
+esp_err_t wifi_service_set_realtime_mode(bool enabled)
+{
+    if (!s_wifi.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_wifi.realtime_mode == enabled) {
+        return ESP_OK;
+    }
+    s_wifi.realtime_mode = enabled;
+    ESP_LOGI(TAG, "Wi-Fi profile switch requested: %s",
+             enabled ? "realtime" : "idle");
+
+    /* Apply runtime knobs immediately on active link. */
+    if (s_wifi.wifi_started) {
+        wifi_mode_t mode = WIFI_MODE_NULL;
+        if (esp_wifi_get_mode(&mode) == ESP_OK) {
+            wifi_service_apply_low_power_profile(mode);
+        }
+    }
     return ESP_OK;
 }
 

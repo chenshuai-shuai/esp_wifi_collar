@@ -64,147 +64,75 @@ menu "Collar Configuration"
         help
             TCP connect timeout used by the cloud reachability probe.
 
-    config COLLAR_CONVERSATION_ENABLE
-        bool "Enable conversation service"
-        default y
-        help
-            Enable the Traini real-time conversation transport service derived from
-            the Android BLE app implementation.
+    menu "Conversation gRPC client (manual h2c + nanopb)"
 
-    config COLLAR_CONVERSATION_HOST
-        string "Conversation gRPC host"
-        default "traini-grpc-collar-dev-nlb-06c70e7556ee7ab5.elb.us-east-1.amazonaws.com"
-        help
-            gRPC conversation service host reused from the Android app.
+        config COLLAR_CONV_HOST
+            string "Conversation gRPC server host"
+            default "traini-grpc-collar-dev-nlb-06c70e7556ee7ab5.elb.us-east-1.amazonaws.com"
+            help
+                Hostname of the cloud gRPC server (traini.ConversationService).
+                Must match the Android client (NLB). Leave empty to keep the
+                conversation client idle.
 
-    config COLLAR_CONVERSATION_PORT
-        int "Conversation gRPC port"
-        range 1 65535
-        default 50051
-        help
-            gRPC conversation service port.
+        config COLLAR_CONV_PORT
+            int "Conversation gRPC server port"
+            range 1 65535
+            default 50051
+            help
+                TCP port of the gRPC server. The current backend is plaintext
+                HTTP/2 (h2c) behind an AWS NLB on port 50051, matching the
+                Android companion app's usePlaintext() channel.
 
-    config COLLAR_CONVERSATION_USER_ID
-        string "Conversation user-id metadata"
-        default "demo_user"
-        help
-            Default value for the gRPC metadata header user-id.
+        config COLLAR_CONV_USER_ID
+            string "gRPC user-id metadata header"
+            default "CollarOne"
+            help
+                Value sent in the "user-id" custom HTTP/2 header, matching the
+                Android app's GrpcAudioClient.setUserId() value.
 
-    config COLLAR_CONVERSATION_AUDIO_SAMPLE_RATE
-        int "Conversation audio sample rate"
-        range 8000 48000
-        default 24000
-        help
-            Audio sample rate derived from the Android app defaults.
+        config COLLAR_CONV_AUDIO_BASE64
+            bool "Encode AudioChunk.audio_data as base64 string (match Android)"
+            default y
+            help
+                The Android companion encodes the raw PCM bytes as a base64
+                ASCII string and puts that into the bytes field. Keep this
+                enabled so the server sees identical payloads from both
+                clients.
 
-    config COLLAR_CONVERSATION_AUDIO_CHANNELS
-        int "Conversation audio channels"
-        range 1 2
-        default 1
-        help
-            Number of audio channels for the conversation stream.
 
-    config COLLAR_CONVERSATION_AUDIO_BIT_DEPTH
-        int "Conversation audio bit depth"
-        range 8 32
-        default 16
-        help
-            Audio bit depth for the conversation stream.
+        config COLLAR_CONV_RETRY_INTERVAL_SEC
+            int "Reconnect retry interval (seconds)"
+            range 3 300
+            default 10
 
-    config COLLAR_CONVERSATION_ENCODING
-        string "Conversation audio encoding"
-        default "pcm16"
-        help
-            Audio encoding string sent in Traini AudioFormat.
+        config COLLAR_CONV_AUDIO_SAMPLE_RATE
+            int "Uplink audio sample rate"
+            range 8000 48000
+            default 24000
 
-    config COLLAR_CONVERSATION_UPLINK_BASE64
-        bool "Conversation uplink audio uses base64"
-        default y
-        help
-            Android app currently base64-encodes audio_data on uplink.
+        config COLLAR_CONV_AUDIO_CHANNELS
+            int "Uplink audio channels"
+            range 1 2
+            default 1
 
-    config COLLAR_CONVERSATION_DOWNLINK_BASE64
-        bool "Conversation downlink audio may use base64"
-        default y
-        help
-            Android app currently allows base64 audio payloads on downlink.
+        config COLLAR_CONV_AUDIO_BIT_DEPTH
+            int "Uplink audio bit depth"
+            range 8 32
+            default 16
 
-    config COLLAR_CONVERSATION_AUTODETECT_DOWNLINK_BASE64
-        bool "Autodetect base64 downlink audio"
-        default y
-        help
-            Android app currently auto-detects whether downlink audio_data is base64 text.
+        config COLLAR_CONV_AUDIO_ENCODING
+            string "Uplink AudioFormat encoding string"
+            default "pcm16"
 
-    config COLLAR_CONVERSATION_TRANSPORT_ENABLE
-        bool "Enable conversation HTTP/2 transport probe"
-        default y
-        help
-            Once TCP reachability is confirmed, open a long-lived plaintext socket to
-            the gRPC endpoint and perform the minimal HTTP/2 client preface handshake.
+        # Conversation sessions are driven exclusively via the UART console
+        # commands "ESP:CONV_START" / "ESP:CONV_STOP:<sid>" issued by the
+        # nRF companion (see ESP_NRF_SYSTEM_CONTRACT.md). No auto-start,
+        # demo loop, or self-test driver is compiled into the firmware.
 
-    config COLLAR_CONVERSATION_TRANSPORT_RETRY_INTERVAL_SEC
-        int "Conversation transport retry interval (seconds)"
-        range 3 300
-        default 10
-        help
-            How often to retry the HTTP/2 transport handshake after a failure.
+    endmenu
 
-    config COLLAR_CONVERSATION_TRANSPORT_CONNECT_TIMEOUT_MS
-        int "Conversation transport connect timeout (ms)"
-        range 500 20000
-        default 3000
-        help
-            TCP connect timeout used by the conversation transport socket.
 
-    config COLLAR_CONVERSATION_TRANSPORT_HANDSHAKE_TIMEOUT_MS
-        int "Conversation transport handshake timeout (ms)"
-        range 500 20000
-        default 3000
-        help
-            Time budget for receiving the first valid HTTP/2 frame from the server
-            after sending the client preface and SETTINGS.
 
-    config COLLAR_CONVERSATION_SELF_TEST_ENABLE
-        bool "Enable synthetic conversation audio self-test"
-        default y
-        help
-            Start an application-level self-test that opens a gRPC conversation
-            session and sends synthesized PCM frames without requiring a microphone
-            or speaker. This is intended to validate the cloud conversation path
-            before audio hardware is wired in.
-
-    config COLLAR_CONVERSATION_SELF_TEST_START_DELAY_SEC
-        int "Self-test start delay (seconds)"
-        range 0 30
-        default 5
-        depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
-        help
-            Delay after the ESP requests a conversation session before it starts
-            sending AudioChunk data to the server.
-
-    config COLLAR_CONVERSATION_SELF_TEST_CHUNK_MS
-        int "Self-test chunk duration (ms)"
-        range 10 200
-        default 20
-        depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
-        help
-            Duration of each synthesized AudioChunk sent during self-test.
-
-    config COLLAR_CONVERSATION_SELF_TEST_TOTAL_MS
-        int "Self-test total audio duration (ms)"
-        range 200 10000
-        default 3000
-        depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
-        help
-            Total synthesized audio duration sent in one self-test session.
-
-    config COLLAR_CONVERSATION_SELF_TEST_REPEAT_DELAY_SEC
-        int "Self-test repeat delay (seconds)"
-        range 3 300
-        default 15
-        depends on COLLAR_CONVERSATION_SELF_TEST_ENABLE
-        help
-            Idle delay before automatically starting the next synthetic test session.
 
     config COLLAR_MICROPHONE_ENABLE
         bool "Enable onboard PDM microphone input"

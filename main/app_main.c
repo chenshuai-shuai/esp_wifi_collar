@@ -17,6 +17,9 @@
 #include "platform_hal/log_control.h"
 #include "services/service_manager.h"
 
+#include "firmware_version.h"
+
+
 static const char *TAG = "main";
 
 static const char *reset_reason_to_string(esp_reset_reason_t reason)
@@ -67,8 +70,19 @@ static void log_boot_identity(void)
 
     esp_chip_info(&chip);
 
+    /*
+     * Loud, easy-to-grep firmware tag. Bump FW_VERSION_BUILD in
+     * firmware_version.h whenever we ship a behavioural change, so
+     * looking at the boot banner immediately reveals stale flash.
+     * Compile-time __DATE__/__TIME__ anchors the log to a specific
+     * build artefact even when the in-app tag is forgotten to be
+     * bumped.
+     */
+    ESP_LOGI(TAG, "FW-VER: %s (build=%d) compiled %s %s",
+             FW_VERSION_STRING, FW_VERSION_BUILD, __DATE__, __TIME__);
     ESP_LOGI(TAG, "Boot start: project=%s version=%s idf=%s",
              app_desc->project_name, app_desc->version, esp_get_idf_version());
+
     ESP_LOGI(TAG, "Chip info: model=%s cores=%d revision=%d features=0x%" PRIx32,
              CONFIG_IDF_TARGET, chip.cores, chip.revision, chip.features);
     ESP_LOGI(TAG, "Reset reason: %s (%d)",
