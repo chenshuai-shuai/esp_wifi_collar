@@ -30,15 +30,28 @@
  */
 #pragma once
 
-#define FW_VERSION_BUILD      44
-#define FW_VERSION_CODENAME   "manual-uplink-stackfix-and-wire-align"
-#define FW_VERSION_STRING     "v0.0.44-manual-uplink-stackfix-and-wire-align"
+#define FW_VERSION_BUILD      46
+#define FW_VERSION_CODENAME   "nghttp2-stream-uplink"
+#define FW_VERSION_STRING     "v0.0.46-nghttp2-stream-uplink"
+/*
+ *   46 - Replace the fragile hand-written StreamConversation DATA sender
+ *        with nghttp2-managed HTTP/2 for the streaming uplink path.
+ *        Keep the already-working START/STOP orchestration, raw PCM
+ *        AudioChunk encoding, 5 s uplink holdoff, and minimal EndConversation
+ *        h2c sender unchanged.
+ */
+/*
+ *   45 - Align ESP uplink payload with Android app startup config:
+ *        HiltApplication calls GrpcAudioClient.setEncodeAudioAsBase64(false),
+ *        so AudioChunk.audio_data must carry raw PCM16 bytes directly rather
+ *        than base64 ASCII.
+ */
 /*
  *   44 - Uplink hardening + Android wire alignment:
  *        - fix uplink stack overflows on dlg_ul / send_audio path
  *        - fix chunk fill state machine (avoid need=0 read deadlock)
- *        - align AudioChunk payload policy with Android client
- *          (base64 audio, format+timestamp per chunk)
+ *        - align AudioChunk metadata policy with Android client
+ *          (format+timestamp per chunk)
  */
 /*
  *   43 - Manual uplink transport upgraded to persistent mode:

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <sys/types.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -31,6 +32,8 @@
 #include "pb_encode.h"
 #include "traini.pb.h"
 
+#include "nghttp2/nghttp2.h"
+
 #define TAG "conv_cli"
 
 #define CONV_TASK_STACK_WORDS         6144
@@ -40,7 +43,9 @@
 #define CONV_TX_FRAME_MAX_BYTES       6144
 #define CONV_TX_B64_MAX_BYTES         4608
 #define CONV_TX_ENQUEUE_WAIT_MS       25
+#define CONV_TX_DATA_SEND_TIMEOUT_MS  2000
 #define CONV_SESSION_ID_MAX           64
+#define CONV_RX_BUFFER_BYTES          32768
 
 #ifndef CONFIG_COLLAR_CONV_HOST
 #  define CONFIG_COLLAR_CONV_HOST ""
@@ -83,6 +88,7 @@ typedef struct {
     bool stream_half_closed;
     bool server_ended;
     bool session_active;
+    bool downlink_active;
     uint16_t grpc_status;
     int32_t stream_id;
     char session_id[CONV_SESSION_ID_MAX];
@@ -113,17 +119,29 @@ typedef struct {
     int sock;
     bool connected;
     bool stream_open;
+    bool headers_sent;
+    bool data_pending;
     uint32_t stream_id;
     uint32_t next_stream_id;
     int32_t conn_remote_window;
     int32_t stream_remote_window;
     int32_t peer_initial_window;
-    uint8_t rx_buf[2048];
+    uint8_t rx_buf[CONV_RX_BUFFER_BYTES];
     size_t  rx_len;
     bool seen_first_event;
     bool seen_first_audio;
+    bool peer_settings_seen;
     int last_sock_errno;
     uint32_t last_h2_code;
+    uint32_t send_timeout_count;
+    nghttp2_session *session;
+    nghttp2_session_callbacks *callbacks;
+    struct {
+        const uint8_t *data;
+        size_t len;
+        size_t off;
+        uint64_t seq;
+    } tx_src;
 } manual_h2_t;
 
 static conv_state_t s_conv;
@@ -141,6 +159,8 @@ static uint8_t s_tx_b64_buf[CONV_TX_B64_MAX_BYTES];
 static volatile bool s_abort_req;
 static esp_err_t s_abort_err;
 static char s_abort_reason[48];
+
+static void h2_poll_rx(void);
 
 static const char *conversation_client_state_str_impl(conversation_state_t s)
 {
@@ -328,57 +348,30 @@ static int tcp_connect_blocking(const char *host, uint16_t port, int timeout_ms)
     return sock;
 }
 
-static esp_err_t h2_send_all(const uint8_t *buf, size_t len, int timeout_ms)
-{
-    size_t sent = 0;
-    const int64_t deadline = esp_timer_get_time() + ((int64_t)timeout_ms * 1000LL);
-
-    while (sent < len) {
-        if (esp_timer_get_time() >= deadline) return ESP_ERR_TIMEOUT;
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET(s_h2.sock, &wfds);
-        struct timeval tv = { .tv_sec = 0, .tv_usec = 20000 };
-        int sel = select(s_h2.sock + 1, NULL, &wfds, NULL, &tv);
-        if (sel < 0) {
-            if (errno == EINTR) continue;
-            s_h2.last_sock_errno = errno;
-            ESP_LOGW(TAG, "h2 send select failed: errno=%d", errno);
-            return ESP_FAIL;
-        }
-        if (sel == 0) continue;
-
-        int n = send(s_h2.sock, buf + sent, len - sent, 0);
-        if (n > 0) {
-            sent += (size_t)n;
-            continue;
-        }
-        if (n == 0) {
-            s_h2.last_sock_errno = 0;
-            ESP_LOGW(TAG, "h2 send returned 0 (peer closed?) sent=%u/%u",
-                     (unsigned)sent, (unsigned)len);
-            return ESP_FAIL;
-        }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
-        s_h2.last_sock_errno = (n < 0) ? errno : 0;
-        ESP_LOGW(TAG, "h2 send failed: n=%d errno=%d sent=%u/%u",
-                 n, (n < 0) ? errno : 0, (unsigned)sent, (unsigned)len);
-        return ESP_FAIL;
-    }
-    return ESP_OK;
-}
-
 static void h2_close(const char *why)
 {
+    if (s_h2.session != NULL) {
+        nghttp2_session_del(s_h2.session);
+        s_h2.session = NULL;
+    }
+    if (s_h2.callbacks != NULL) {
+        nghttp2_session_callbacks_del(s_h2.callbacks);
+        s_h2.callbacks = NULL;
+    }
     if (s_h2.sock >= 0) close(s_h2.sock);
     s_h2.sock = -1;
     s_h2.connected = false;
     s_h2.stream_open = false;
+    s_h2.headers_sent = false;
+    s_h2.data_pending = false;
     s_h2.rx_len = 0;
     s_h2.conn_remote_window = 65535;
     s_h2.stream_remote_window = s_h2.peer_initial_window;
     s_h2.seen_first_event = false;
     s_h2.seen_first_audio = false;
+    s_h2.peer_settings_seen = false;
+    memset(&s_h2.tx_src, 0, sizeof(s_h2.tx_src));
+    s_conv.downlink_active = false;
 
     s_conv.transport_ready = false;
     s_conv.stream_ready = false;
@@ -393,74 +386,23 @@ static void h2_close(const char *why)
     s_h2.last_h2_code = 0;
 }
 
-static esp_err_t h2_send_settings_ack(void)
-{
-    uint8_t f[9];
-    h2_frame_header(f, 0, 0x04, 0x01, 0);
-    return h2_send_all(f, sizeof(f), 1000);
-}
-
-static esp_err_t h2_send_window_update(uint32_t sid, uint32_t inc)
-{
-    uint8_t f[13];
-    h2_frame_header(f, 4, 0x08, 0, sid);
-    f[9] = (uint8_t)((inc >> 24) & 0x7f);
-    f[10] = (uint8_t)((inc >> 16) & 0xff);
-    f[11] = (uint8_t)((inc >> 8) & 0xff);
-    f[12] = (uint8_t)(inc & 0xff);
-    return h2_send_all(f, sizeof(f), 1000);
-}
-
-static void h2_on_settings(const uint8_t *pl, size_t len, bool ack)
-{
-    if (ack) return;
-    for (size_t off = 0; off + 6 <= len; off += 6) {
-        uint16_t id = (uint16_t)(((uint16_t)pl[off] << 8) | pl[off + 1]);
-        uint32_t v = ((uint32_t)pl[off + 2] << 24) | ((uint32_t)pl[off + 3] << 16) |
-                     ((uint32_t)pl[off + 4] << 8) | (uint32_t)pl[off + 5];
-        if (id == 0x4) {
-            int32_t oldv = s_h2.peer_initial_window;
-            s_h2.peer_initial_window = (int32_t)v;
-            if (s_h2.stream_open) s_h2.stream_remote_window += ((int32_t)v - oldv);
-        }
-    }
-    if (h2_send_settings_ack() != ESP_OK) h2_close("settings-ack-fail");
-}
-
-static void h2_on_window_update(uint32_t sid, const uint8_t *pl, size_t len)
-{
-    if (len < 4) return;
-    uint32_t inc = ((uint32_t)pl[0] << 24) | ((uint32_t)pl[1] << 16) |
-                   ((uint32_t)pl[2] << 8) | (uint32_t)pl[3];
-    inc &= 0x7fffffffU;
-    if (inc == 0) return;
-
-    if (sid == 0) s_h2.conn_remote_window += (int32_t)inc;
-    else if (sid == s_h2.stream_id) s_h2.stream_remote_window += (int32_t)inc;
-}
-
 typedef struct {
-    uint8_t *buf;
-    size_t len;
-    size_t cap;
-} bytes_collector_t;
+    uint32_t bytes;
+} bytes_discard_counter_t;
 
-static bool pb_decode_bytes_collect(pb_istream_t *stream, const pb_field_t *field, void **arg)
+static bool pb_decode_bytes_discard(pb_istream_t *stream, const pb_field_t *field, void **arg)
 {
     (void)field;
-    bytes_collector_t *c = (bytes_collector_t *)(*arg);
-    size_t to_read = stream->bytes_left;
-    if (to_read == 0) return true;
-    if (c->len + to_read > c->cap) {
-        size_t nc = c->cap == 0 ? to_read : c->cap;
-        while (nc < c->len + to_read) nc *= 2;
-        uint8_t *nb = (uint8_t *)realloc(c->buf, nc);
-        if (!nb) return false;
-        c->buf = nb;
-        c->cap = nc;
+    bytes_discard_counter_t *c = (bytes_discard_counter_t *)(*arg);
+    uint8_t tmp[128];
+
+    while (stream->bytes_left > 0) {
+        size_t n = stream->bytes_left > sizeof(tmp) ? sizeof(tmp) : stream->bytes_left;
+        if (!pb_read(stream, tmp, n)) return false;
+        if (c != NULL) {
+            c->bytes += (uint32_t)n;
+        }
     }
-    if (!pb_read(stream, c->buf + c->len, to_read)) return false;
-    c->len += to_read;
     return true;
 }
 
@@ -497,15 +439,15 @@ static void handle_downlink(const uint8_t *data, size_t len)
         }
 
         traini_ConversationEvent evt = traini_ConversationEvent_init_default;
-        bytes_collector_t audio_col = {0};
+        bytes_discard_counter_t audio_discard = {0};
         char err_code[48] = {0};
         char err_msg[48] = {0};
         evt.event.error.code.funcs.decode = pb_decode_string_to_buf;
         evt.event.error.code.arg = err_code;
         evt.event.error.message.funcs.decode = pb_decode_string_to_buf;
         evt.event.error.message.arg = err_msg;
-        evt.event.audio_output.audio_data.funcs.decode = pb_decode_bytes_collect;
-        evt.event.audio_output.audio_data.arg = &audio_col;
+        evt.event.audio_output.audio_data.funcs.decode = pb_decode_bytes_discard;
+        evt.event.audio_output.audio_data.arg = &audio_discard;
 
         pb_istream_t is = pb_istream_from_buffer(data + off + 5, msg_len);
         if (pb_decode(&is, traini_ConversationEvent_fields, &evt)) {
@@ -517,133 +459,250 @@ static void handle_downlink(const uint8_t *data, size_t len)
             }
             if (evt.which_event == traini_ConversationEvent_audio_output_tag) {
                 s_conv.rx_audio_events++;
-                s_conv.rx_audio_bytes += (uint32_t)audio_col.len;
+                s_conv.rx_audio_bytes += audio_discard.bytes;
                 if (!s_h2.seen_first_audio) {
                     s_h2.seen_first_audio = true;
+                    s_conv.downlink_active = true;
+                    if (s_tx_queue != NULL) {
+                        xQueueReset(s_tx_queue);
+                    }
                     if (s_conv.audio_start_cb) s_conv.audio_start_cb(s_conv.audio_start_cb_arg);
                 }
-                if (s_conv.audio_output_cb && audio_col.len > 0) {
-                    s_conv.audio_output_cb(audio_col.buf,
-                                           audio_col.len,
-                                           evt.event.audio_output.sequence_number,
-                                           s_conv.audio_output_cb_arg);
+                if (s_conv.rx_audio_events <= 3U || (s_conv.rx_audio_events % 20U) == 0U) {
+                    ESP_LOGI(TAG,
+                             "downlink audio discarded: event=%lu seq=%lld bytes=%lu total=%lu",
+                             (unsigned long)s_conv.rx_audio_events,
+                             (long long)evt.event.audio_output.sequence_number,
+                             (unsigned long)audio_discard.bytes,
+                             (unsigned long)s_conv.rx_audio_bytes);
                 }
             } else if (evt.which_event == traini_ConversationEvent_audio_complete_tag) {
                 s_h2.seen_first_audio = false;
+                s_conv.downlink_active = false;
                 if (s_conv.audio_complete_cb) s_conv.audio_complete_cb(s_conv.audio_complete_cb_arg);
             } else if (evt.which_event == traini_ConversationEvent_error_tag) {
                 if (s_conv.error_cb) s_conv.error_cb(err_code, err_msg, s_conv.error_cb_arg);
             }
         }
-        free(audio_col.buf);
         off += 5 + msg_len;
     }
 }
 
+static void h2_mark_stream_ended(const char *why)
+{
+    s_h2.stream_open = false;
+    s_conv.stream_ready = false;
+    s_conv.stream_half_closed = true;
+    s_conv.server_ended = true;
+    s_conv.downlink_active = false;
+    if (why != NULL) {
+        ESP_LOGW(TAG, "stream ended by server: %s sid=%u",
+                 why, (unsigned)s_h2.stream_id);
+    }
+}
+
+static nghttp2_ssize ng_send_cb(nghttp2_session *session,
+                                const uint8_t *data,
+                                size_t length,
+                                int flags,
+                                void *user_data)
+{
+    (void)session;
+    (void)flags;
+    (void)user_data;
+    int n = send(s_h2.sock, data, length, 0);
+    if (n > 0) {
+        return (nghttp2_ssize)n;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+    s_h2.last_sock_errno = (n < 0) ? errno : 0;
+    return NGHTTP2_ERR_CALLBACK_FAILURE;
+}
+
+static nghttp2_ssize ng_recv_cb(nghttp2_session *session,
+                                uint8_t *buf,
+                                size_t length,
+                                int flags,
+                                void *user_data)
+{
+    (void)session;
+    (void)flags;
+    (void)user_data;
+    int n = recv(s_h2.sock, buf, length, 0);
+    if (n > 0) {
+        return (nghttp2_ssize)n;
+    }
+    if (n == 0) {
+        return NGHTTP2_ERR_EOF;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        return NGHTTP2_ERR_WOULDBLOCK;
+    }
+    s_h2.last_sock_errno = errno;
+    return NGHTTP2_ERR_CALLBACK_FAILURE;
+}
+
+static ssize_t ng_data_read_cb(nghttp2_session *session,
+                               int32_t stream_id,
+                               uint8_t *buf,
+                               size_t length,
+                               uint32_t *data_flags,
+                               nghttp2_data_source *source,
+                               void *user_data)
+{
+    (void)session;
+    (void)stream_id;
+    (void)source;
+    (void)user_data;
+    size_t left = s_h2.tx_src.len - s_h2.tx_src.off;
+    size_t n = left < length ? left : length;
+    if (n > 0U) {
+        memcpy(buf, s_h2.tx_src.data + s_h2.tx_src.off, n);
+        s_h2.tx_src.off += n;
+    }
+    if (s_h2.tx_src.off >= s_h2.tx_src.len) {
+        *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    }
+    return (ssize_t)n;
+}
+
+static int ng_on_frame_recv_cb(nghttp2_session *session,
+                               const nghttp2_frame *frame,
+                               void *user_data)
+{
+    (void)session;
+    (void)user_data;
+    if (frame->hd.type == NGHTTP2_SETTINGS && (frame->hd.flags & NGHTTP2_FLAG_ACK) == 0) {
+        s_h2.peer_settings_seen = true;
+        ESP_LOGI(TAG, "peer SETTINGS received: nghttp2");
+    } else if (frame->hd.stream_id == (int32_t)s_h2.stream_id) {
+        if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
+            (frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
+            h2_mark_stream_ended(frame->hd.type == NGHTTP2_HEADERS ? "headers-end-stream" : "data-end-stream");
+        }
+    } else if (frame->hd.type == NGHTTP2_GOAWAY) {
+        s_h2.last_h2_code = frame->goaway.error_code;
+        h2_close("goaway");
+    } else if (frame->hd.type == NGHTTP2_RST_STREAM &&
+               frame->hd.stream_id == (int32_t)s_h2.stream_id) {
+        s_h2.last_h2_code = frame->rst_stream.error_code;
+        h2_mark_stream_ended("rst-stream");
+    }
+    return 0;
+}
+
+static int ng_on_frame_send_cb(nghttp2_session *session,
+                               const nghttp2_frame *frame,
+                               void *user_data)
+{
+    (void)session;
+    (void)user_data;
+    if (frame->hd.stream_id == (int32_t)s_h2.stream_id) {
+        if (frame->hd.type == NGHTTP2_HEADERS) {
+            s_h2.headers_sent = true;
+        } else if (frame->hd.type == NGHTTP2_DATA) {
+            s_h2.data_pending = false;
+        }
+    }
+    return 0;
+}
+
+static int ng_on_data_chunk_recv_cb(nghttp2_session *session,
+                                    uint8_t flags,
+                                    int32_t stream_id,
+                                    const uint8_t *data,
+                                    size_t len,
+                                    void *user_data)
+{
+    (void)session;
+    (void)flags;
+    (void)user_data;
+    if (stream_id == (int32_t)s_h2.stream_id && len > 0U) {
+        handle_downlink(data, len);
+    }
+    return 0;
+}
+
+static int ng_error_cb(nghttp2_session *session,
+                       const char *msg,
+                       size_t len,
+                       void *user_data)
+{
+    (void)session;
+    (void)user_data;
+    if (len > 0U) {
+        ESP_LOGW(TAG, "nghttp2: %.*s", (int)len, msg);
+    }
+    return 0;
+}
+
+static esp_err_t h2_drive_io(int timeout_ms)
+{
+    if (!s_h2.connected || s_h2.session == NULL || s_h2.sock < 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const int64_t deadline = esp_timer_get_time() + ((int64_t)timeout_ms * 1000LL);
+    do {
+        int rv = nghttp2_session_recv(s_h2.session);
+        if (rv != 0) {
+            h2_close("nghttp2-recv-fail");
+            return ESP_FAIL;
+        }
+        rv = nghttp2_session_send(s_h2.session);
+        if (rv != 0) {
+            h2_close("nghttp2-send-fail");
+            return ESP_FAIL;
+        }
+        if (timeout_ms == 0) {
+            return ESP_OK;
+        }
+
+        fd_set rfds;
+        fd_set wfds;
+        FD_ZERO(&rfds);
+        FD_ZERO(&wfds);
+        bool want_read = nghttp2_session_want_read(s_h2.session);
+        bool want_write = nghttp2_session_want_write(s_h2.session);
+        if (want_read) FD_SET(s_h2.sock, &rfds);
+        if (want_write) FD_SET(s_h2.sock, &wfds);
+        if (!want_read && !want_write) {
+            return ESP_OK;
+        }
+
+        int64_t left_us = deadline - esp_timer_get_time();
+        if (left_us <= 0) {
+            return ESP_ERR_TIMEOUT;
+        }
+        if (left_us > 20000LL) left_us = 20000LL;
+        struct timeval tv = {
+            .tv_sec = 0,
+            .tv_usec = (suseconds_t)left_us,
+        };
+        int sel = select(s_h2.sock + 1,
+                         want_read ? &rfds : NULL,
+                         want_write ? &wfds : NULL,
+                         NULL,
+                         &tv);
+        if (sel < 0 && errno != EINTR) {
+            s_h2.last_sock_errno = errno;
+            h2_close("select-fail");
+            return ESP_FAIL;
+        }
+    } while (esp_timer_get_time() < deadline);
+    return ESP_ERR_TIMEOUT;
+}
+
 static void h2_poll_rx(void)
 {
-    if (!s_h2.connected || s_h2.sock < 0) return;
-
-    for (;;) {
-        if (s_h2.rx_len >= sizeof(s_h2.rx_buf)) {
-            h2_close("rx-overflow");
-            return;
-        }
-        int r = recv(s_h2.sock, s_h2.rx_buf + s_h2.rx_len, sizeof(s_h2.rx_buf) - s_h2.rx_len, 0);
-        if (r > 0) s_h2.rx_len += (size_t)r;
-        else if (r == 0) {
-            h2_close("peer-closed");
-            return;
-        } else {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
-            h2_close("recv-err");
-            return;
-        }
-    }
-
-    size_t off = 0;
-    while (s_h2.rx_len - off >= 9) {
-        const uint8_t *h = s_h2.rx_buf + off;
-        uint32_t flen = ((uint32_t)h[0] << 16) | ((uint32_t)h[1] << 8) | (uint32_t)h[2];
-        uint8_t type = h[3];
-        uint8_t flags = h[4];
-        uint32_t sid = ((uint32_t)(h[5] & 0x7f) << 24) | ((uint32_t)h[6] << 16) |
-                       ((uint32_t)h[7] << 8) | (uint32_t)h[8];
-        if (s_h2.rx_len - off < 9U + flen) break;
-        const uint8_t *pl = h + 9;
-
-        switch (type) {
-        case 0x04:
-            h2_on_settings(pl, flen, (flags & 0x01U) != 0U);
-            break;
-        case 0x08:
-            h2_on_window_update(sid, pl, flen);
-            break;
-        case 0x07:
-            if (flen >= 8U) {
-                uint32_t ec = ((uint32_t)pl[4] << 24) | ((uint32_t)pl[5] << 16) |
-                              ((uint32_t)pl[6] << 8) | (uint32_t)pl[7];
-                s_h2.last_h2_code = ec;
-                ESP_LOGW(TAG, "GOAWAY: sid=%" PRIu32 " err=%" PRIu32, sid, ec);
-            } else {
-                ESP_LOGW(TAG, "GOAWAY: malformed len=%u", (unsigned)flen);
-            }
-            h2_close("goaway");
-            return;
-        case 0x03:
-            if (sid == s_h2.stream_id) {
-                if (flen >= 4U) {
-                    uint32_t ec = ((uint32_t)pl[0] << 24) | ((uint32_t)pl[1] << 16) |
-                                  ((uint32_t)pl[2] << 8) | (uint32_t)pl[3];
-                    s_h2.last_h2_code = ec;
-                    ESP_LOGW(TAG, "RST_STREAM: sid=%u err=%u", (unsigned)sid, (unsigned)ec);
-                } else {
-                    ESP_LOGW(TAG, "RST_STREAM: sid=%u malformed len=%u",
-                             (unsigned)sid, (unsigned)flen);
-                }
-                s_h2.stream_open = false;
-                s_conv.stream_ready = false;
-                s_conv.stream_half_closed = true;
-                s_conv.server_ended = true;
-            }
-            break;
-        case 0x06:
-            if ((flags & 0x01U) == 0U && flen == 8U) {
-                uint8_t fr[17];
-                h2_frame_header(fr, 8, 0x06, 0x01, 0);
-                memcpy(fr + 9, pl, 8);
-                (void)h2_send_all(fr, sizeof(fr), 1000);
-            }
-            break;
-        case 0x00:
-            if (sid == s_h2.stream_id && flen > 0) {
-                handle_downlink(pl, flen);
-                (void)h2_send_window_update(0, flen);
-                (void)h2_send_window_update(s_h2.stream_id, flen);
-                if (flags & 0x01U) {
-                    s_h2.stream_open = false;
-                    s_conv.stream_ready = false;
-                    s_conv.stream_half_closed = true;
-                    s_conv.server_ended = true;
-                }
-            }
-            break;
-        default:
-            break;
-        }
-
-        off += 9U + flen;
-    }
-
-    if (off > 0 && off <= s_h2.rx_len) {
-        memmove(s_h2.rx_buf, s_h2.rx_buf + off, s_h2.rx_len - off);
-        s_h2.rx_len -= off;
-    }
+    if (!s_h2.connected || s_h2.session == NULL || s_h2.sock < 0) return;
+    (void)h2_drive_io(0);
 }
 
 static esp_err_t h2_connect_if_needed(void)
 {
-    if (s_h2.connected && s_h2.sock >= 0) return ESP_OK;
+    if (s_h2.connected && s_h2.sock >= 0 && s_h2.session != NULL) return ESP_OK;
 
     s_conv.connect_attempts++;
     int sock = tcp_connect_blocking(CONFIG_COLLAR_CONV_HOST, (uint16_t)CONFIG_COLLAR_CONV_PORT, 5000);
@@ -659,17 +718,43 @@ static esp_err_t h2_connect_if_needed(void)
     s_h2.rx_len = 0;
     s_h2.conn_remote_window = 65535;
     s_h2.stream_remote_window = s_h2.peer_initial_window;
+    s_h2.peer_settings_seen = false;
+    s_h2.headers_sent = false;
+    s_h2.data_pending = false;
 
-    uint8_t wire[64];
-    size_t off = 0;
-    static const char PREFACE[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-    memcpy(wire + off, PREFACE, sizeof(PREFACE) - 1);
-    off += sizeof(PREFACE) - 1;
-    h2_frame_header(wire + off, 0, 0x04, 0, 0);
-    off += 9;
+    int rv = nghttp2_session_callbacks_new(&s_h2.callbacks);
+    if (rv != 0) {
+        ESP_LOGE(TAG, "nghttp2 callbacks alloc failed: %s heap=%lu",
+                 nghttp2_strerror(rv), (unsigned long)esp_get_free_heap_size());
+        h2_close("nghttp2-cb-alloc");
+        s_conv.connect_failures++;
+        return ESP_ERR_NO_MEM;
+    }
+    nghttp2_session_callbacks_set_send_callback(s_h2.callbacks, ng_send_cb);
+    nghttp2_session_callbacks_set_recv_callback(s_h2.callbacks, ng_recv_cb);
+    nghttp2_session_callbacks_set_on_frame_recv_callback(s_h2.callbacks, ng_on_frame_recv_cb);
+    nghttp2_session_callbacks_set_on_frame_send_callback(s_h2.callbacks, ng_on_frame_send_cb);
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(s_h2.callbacks, ng_on_data_chunk_recv_cb);
+    nghttp2_session_callbacks_set_error_callback(s_h2.callbacks, ng_error_cb);
 
-    if (h2_send_all(wire, off, 2000) != ESP_OK) {
-        h2_close("preface-send-fail");
+    rv = nghttp2_session_client_new(&s_h2.session, s_h2.callbacks, NULL);
+    if (rv != 0) {
+        ESP_LOGE(TAG, "nghttp2_session_client_new failed: %s heap=%lu",
+                 nghttp2_strerror(rv), (unsigned long)esp_get_free_heap_size());
+        h2_close("nghttp2-session-new");
+        s_conv.connect_failures++;
+        return ESP_ERR_NO_MEM;
+    }
+
+    rv = nghttp2_submit_settings(s_h2.session, NGHTTP2_FLAG_NONE, NULL, 0);
+    if (rv != 0) {
+        ESP_LOGE(TAG, "nghttp2_submit_settings failed: %s", nghttp2_strerror(rv));
+        h2_close("nghttp2-settings");
+        s_conv.connect_failures++;
+        return ESP_FAIL;
+    }
+    if (h2_drive_io(2000) != ESP_OK) {
+        h2_close("nghttp2-preface-send");
         s_conv.connect_failures++;
         return ESP_FAIL;
     }
@@ -678,7 +763,7 @@ static esp_err_t h2_connect_if_needed(void)
     s_conv.transport_ready = true;
     s_conv.stream_half_closed = false;
     conv_set_error("");
-    ESP_LOGI(TAG, "manual h2 connected (ok=%lu fail=%lu)",
+    ESP_LOGI(TAG, "nghttp2 connected (ok=%lu fail=%lu)",
              (unsigned long)s_conv.connect_successes,
              (unsigned long)s_conv.connect_failures);
     return ESP_OK;
@@ -688,48 +773,41 @@ static esp_err_t h2_open_stream_if_needed(const char *session_id)
 {
     if (s_h2.stream_open) return ESP_OK;
     if (!session_id || session_id[0] == '\0') return ESP_ERR_INVALID_STATE;
+    if (s_h2.session == NULL) return ESP_ERR_INVALID_STATE;
 
-    uint8_t wire[640];
-    size_t off = 0;
     char authority[128];
     snprintf(authority, sizeof(authority), "%s:%u", CONFIG_COLLAR_CONV_HOST, (unsigned)CONFIG_COLLAR_CONV_PORT);
 
-    const size_t hdr_start = off;
-    off += 9;
-    const size_t hdrs_begin = off;
-    const char *headers[][2] = {
-        {":method", "POST"},
-        {":scheme", "http"},
-        {":authority", authority},
-        {":path", "/traini.ConversationService/StreamConversation"},
-        {"content-type", "application/grpc+proto"},
-        {"te", "trailers"},
-        {"grpc-encoding", "identity"},
-        {"grpc-accept-encoding", "identity"},
-        {"user-agent", "grpc-esp32c3-manual/3.0"},
-        {"user-id", CONFIG_COLLAR_CONV_USER_ID},
-        {"session-id", session_id},
+    const nghttp2_nv headers[] = {
+        {(uint8_t *)":method", (uint8_t *)"POST", 7, 4, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)":scheme", (uint8_t *)"http", 7, 4, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)":authority", (uint8_t *)authority, 10, strlen(authority), NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)":path", (uint8_t *)"/traini.ConversationService/StreamConversation", 5, 46, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"content-type", (uint8_t *)"application/grpc+proto", 12, 22, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"te", (uint8_t *)"trailers", 2, 8, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"grpc-encoding", (uint8_t *)"identity", 13, 8, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"grpc-accept-encoding", (uint8_t *)"identity", 20, 8, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"user-agent", (uint8_t *)"grpc-esp32c3-nghttp2/1.0", 10, 24, NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"user-id", (uint8_t *)CONFIG_COLLAR_CONV_USER_ID, 7, strlen(CONFIG_COLLAR_CONV_USER_ID), NGHTTP2_NV_FLAG_NONE},
+        {(uint8_t *)"session-id", (uint8_t *)session_id, 10, strlen(session_id), NGHTTP2_NV_FLAG_NONE},
     };
 
-    for (size_t i = 0; i < sizeof(headers) / sizeof(headers[0]); ++i) {
-        int n = hpack_put_header(wire + off, headers[i][0], headers[i][1]);
-        if (n < 0 || off + (size_t)n > sizeof(wire)) return ESP_FAIL;
-        off += (size_t)n;
-    }
-
-    uint32_t sid = s_h2.next_stream_id;
-    if (sid == 0U || (sid & 1U) == 0U) sid = 1U;
-    s_h2.next_stream_id = sid + 2U;
-
-    h2_frame_header(wire + hdr_start, (uint32_t)(off - hdrs_begin), 0x01, 0x04, sid);
-
-    if (h2_send_all(wire, off, 2000) != ESP_OK) {
-        h2_close("open-stream-fail");
+    s_h2.headers_sent = false;
+    int32_t sid = nghttp2_submit_headers(s_h2.session,
+                                         NGHTTP2_FLAG_NONE,
+                                         -1,
+                                         NULL,
+                                         headers,
+                                         sizeof(headers) / sizeof(headers[0]),
+                                         NULL);
+    if (sid < 0) {
+        ESP_LOGE(TAG, "nghttp2_submit_headers failed: %s", nghttp2_strerror(sid));
+        h2_close("submit-headers-fail");
         return ESP_FAIL;
     }
 
     s_h2.stream_open = true;
-    s_h2.stream_id = sid;
+    s_h2.stream_id = (uint32_t)sid;
     s_h2.stream_remote_window = s_h2.peer_initial_window;
     s_h2.seen_first_event = false;
     s_h2.seen_first_audio = false;
@@ -738,7 +816,14 @@ static esp_err_t h2_open_stream_if_needed(const char *session_id)
     s_conv.stream_ready = true;
     s_conv.server_ended = false;
     s_conv.stream_half_closed = false;
-    ESP_LOGI(TAG, "manual stream opened sid=%u session=%s", (unsigned)sid, session_id);
+    s_conv.downlink_active = false;
+    esp_err_t dr = h2_drive_io(2000);
+    if (dr != ESP_OK || !s_h2.headers_sent) {
+        ESP_LOGW(TAG, "nghttp2 stream open deferred: sid=%u sent=%d err=0x%x",
+                 (unsigned)sid, s_h2.headers_sent, dr);
+        return ESP_ERR_TIMEOUT;
+    }
+    ESP_LOGI(TAG, "nghttp2 stream opened sid=%u session=%s", (unsigned)sid, session_id);
     return ESP_OK;
 }
 
@@ -755,32 +840,63 @@ static esp_err_t h2_send_audio(const uint8_t *pcm, size_t len, uint64_t seq)
     }
     if (!s_h2.stream_open || s_h2.stream_id == 0U) return ESP_ERR_INVALID_STATE;
 
-    size_t off = 0;
-    while (off < frame_len) {
-        h2_poll_rx();
-        int32_t cw = s_h2.conn_remote_window;
-        int32_t sw = s_h2.stream_remote_window;
-        int32_t win = (cw < sw) ? cw : sw;
-        if (win <= 0) return ESP_ERR_TIMEOUT;
-
-        size_t chunk = frame_len - off;
-        if (chunk > 16384U) chunk = 16384U;
-        if (chunk > (size_t)win) chunk = (size_t)win;
-
-        uint8_t hdr[9];
-        h2_frame_header(hdr, (uint32_t)chunk, 0x00, 0x00, s_h2.stream_id);
-        if (h2_send_all(hdr, sizeof(hdr), 2000) != ESP_OK ||
-            h2_send_all(s_tx_frame_buf + off, chunk, 2000) != ESP_OK) {
-            h2_close("data-send-fail");
-            return ESP_FAIL;
-        }
-
-        off += chunk;
-        s_h2.conn_remote_window -= (int32_t)chunk;
-        s_h2.stream_remote_window -= (int32_t)chunk;
+    h2_poll_rx();
+    if (s_conv.downlink_active) {
+        return ESP_ERR_TIMEOUT;
     }
 
-    if ((seq % 25ULL) == 0ULL) {
+    s_h2.tx_src.data = s_tx_frame_buf;
+    s_h2.tx_src.len = frame_len;
+    s_h2.tx_src.off = 0U;
+    s_h2.tx_src.seq = seq;
+    s_h2.data_pending = true;
+
+    nghttp2_data_provider prd = {
+        .source = {.ptr = &s_h2.tx_src},
+        .read_callback = ng_data_read_cb,
+    };
+    int rv = nghttp2_submit_data(s_h2.session,
+                                 NGHTTP2_FLAG_NONE,
+                                 (int32_t)s_h2.stream_id,
+                                 &prd);
+    if (rv == NGHTTP2_ERR_DATA_EXIST) {
+        esp_err_t flush = h2_drive_io(CONV_TX_DATA_SEND_TIMEOUT_MS);
+        if (flush != ESP_OK) {
+            s_h2.data_pending = false;
+            return flush;
+        }
+        rv = nghttp2_submit_data(s_h2.session,
+                                 NGHTTP2_FLAG_NONE,
+                                 (int32_t)s_h2.stream_id,
+                                 &prd);
+    }
+    if (rv != 0) {
+        s_h2.data_pending = false;
+        ESP_LOGW(TAG, "nghttp2_submit_data failed: seq=%llu %s",
+                 (unsigned long long)seq, nghttp2_strerror(rv));
+        return ESP_FAIL;
+    }
+
+    esp_err_t dr = ESP_OK;
+    const int64_t deadline = esp_timer_get_time() + ((int64_t)CONV_TX_DATA_SEND_TIMEOUT_MS * 1000LL);
+    while (s_h2.data_pending && s_h2.connected && !s_conv.server_ended) {
+        dr = h2_drive_io(20);
+        if (dr != ESP_OK && dr != ESP_ERR_TIMEOUT) {
+            s_h2.data_pending = false;
+            return dr;
+        }
+        if (esp_timer_get_time() >= deadline) {
+            s_h2.data_pending = false;
+            if (seq < 10ULL || (seq % 25ULL) == 0ULL) {
+                ESP_LOGW(TAG, "nghttp2 uplink backpressure: seq=%llu frame=%u",
+                         (unsigned long long)seq, (unsigned)frame_len);
+            }
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+    if (!s_h2.connected || s_conv.server_ended) return ESP_ERR_INVALID_STATE;
+
+    if (seq < 5ULL || (seq % 25ULL) == 0ULL) {
         const int64_t dt_ms = (esp_timer_get_time() - t0) / 1000LL;
         ESP_LOGI(TAG, "uplink wire: seq=%llu raw=%u grpc_frame=%u send_ms=%lld",
                  (unsigned long long)seq,
@@ -875,6 +991,7 @@ static void conv_fail_active_session(const char *reason, esp_err_t err, bool *ha
     ESP_LOGE(TAG, "session abort: %s err=0x%x -> IDLE", reason, err);
     h2_close(reason);
     s_conv.session_active = false;
+    s_conv.downlink_active = false;
     s_conv.stream_ready = false;
     s_conv.stream_half_closed = true;
     s_h2.stream_open = false;
@@ -894,7 +1011,7 @@ static void conv_fail_active_session(const char *reason, esp_err_t err, bool *ha
 static void conv_task(void *arg)
 {
     (void)arg;
-    ESP_LOGI(TAG, "conversation worker started (manual h2 persistent mode)");
+    ESP_LOGI(TAG, "conversation worker started (nghttp2 stream transport)");
 
     bool have_pending = false;
     uint32_t fail_count = 0;
@@ -925,37 +1042,27 @@ static void conv_task(void *arg)
             continue;
         }
 
-        if (h2_connect_if_needed() != ESP_OK) {
-            fail_count++;
-            if (s_conv.session_active) {
-                conv_fail_active_session("connect-fail", ESP_FAIL, &have_pending);
-                vTaskDelay(pdMS_TO_TICKS(100));
-                continue;
-            }
-            if (fail_count <= 3U || (fail_count % 20U) == 0U) {
-                ESP_LOGW(TAG, "manual connect failed (idle) total=%lu", (unsigned long)fail_count);
-            }
-            vTaskDelay(pdMS_TO_TICKS(300));
-            continue;
-        }
-
-        /*
-         * Keep the TCP+h2c transport resident once Wi-Fi is ready.
-         * Session only controls whether we open/drive StreamConversation.
-         */
         if (!s_conv.session_active) {
             if (have_pending) {
                 have_pending = false;
             }
             xQueueReset(s_tx_queue);
+            if (s_h2.connected) {
+                h2_close("idle-no-session");
+            }
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
-        if (h2_open_stream_if_needed(s_conv.session_id) != ESP_OK) {
-            fail_count++;
-            conv_fail_active_session("open-stream-fail", ESP_FAIL, &have_pending);
-            vTaskDelay(pdMS_TO_TICKS(100));
+        if (s_conv.downlink_active) {
+            if (have_pending) {
+                ESP_LOGI(TAG, "downlink active: drop pending uplink seq=%" PRIu64,
+                         s_pending_item.seq);
+                have_pending = false;
+            }
+            xQueueReset(s_tx_queue);
+            h2_poll_rx();
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
@@ -967,12 +1074,42 @@ static void conv_task(void *arg)
             }
         }
 
+        if (h2_connect_if_needed() != ESP_OK) {
+            fail_count++;
+            conv_fail_active_session("connect-fail", ESP_FAIL, &have_pending);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        esp_err_t open_ret = h2_open_stream_if_needed(s_conv.session_id);
+        if (open_ret == ESP_ERR_TIMEOUT) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (open_ret != ESP_OK) {
+            fail_count++;
+            conv_fail_active_session("open-stream-fail", open_ret, &have_pending);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
         esp_err_t r = h2_send_audio(s_pending_item.data, s_pending_item.len, s_pending_item.seq);
         if (r == ESP_OK) {
             have_pending = false;
             s_conv.sent_chunks++;
         } else if (r == ESP_ERR_TIMEOUT) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+            if (have_pending) {
+                ESP_LOGW(TAG, "drop uplink seq=%" PRIu64 " after send backpressure",
+                         s_pending_item.seq);
+                have_pending = false;
+            }
+            xQueueReset(s_tx_queue);
+            h2_poll_rx();
+            vTaskDelay(pdMS_TO_TICKS(20));
+        } else if (r == ESP_ERR_INVALID_STATE && s_conv.server_ended) {
+            ESP_LOGW(TAG, "server ended stream before uplink seq=%" PRIu64,
+                     s_pending_item.seq);
+            conv_fail_active_session("server-ended", r, &have_pending);
         } else {
             fail_count++;
             if (fail_count <= 3U || (fail_count % 20U) == 0U) {
@@ -1023,7 +1160,7 @@ esp_err_t conversation_client_start(void)
              CONFIG_COLLAR_CONV_AUDIO_BIT_DEPTH,
              CONFIG_COLLAR_CONV_AUDIO_ENCODING,
              CONFIG_COLLAR_CONV_AUDIO_BASE64);
-    ESP_LOGI(TAG, "manual persistent mode: no nghttp2 dependency");
+    ESP_LOGI(TAG, "StreamConversation transport: nghttp2; EndConversation remains minimal h2c");
     return ESP_OK;
 }
 
@@ -1078,7 +1215,7 @@ bool conversation_client_stream_writable(void)
 bool conversation_client_session_active(void) { return s_conv.session_active; }
 bool conversation_client_uplink_can_accept(void)
 {
-    if (!conversation_client_stream_writable()) {
+    if (!s_conv.configured || !s_conv.wifi_ready || !s_conv.session_active || s_conv.downlink_active) {
         return false;
     }
     if (s_tx_queue == NULL) {
@@ -1101,12 +1238,14 @@ esp_err_t conversation_client_start_session(const char *session_id)
                  "sess-%lld", (long long)(esp_timer_get_time() / 1000LL));
     }
     s_conv.session_active = true;
+    s_conv.downlink_active = false;
     return ESP_OK;
 }
 
 esp_err_t conversation_client_end_session(void)
 {
     s_conv.session_active = false;
+    s_conv.downlink_active = false;
     s_conv.stream_ready = false;
     s_conv.stream_half_closed = true;
     s_h2.stream_open = false;
@@ -1144,6 +1283,7 @@ esp_err_t conversation_client_start_conversation(const char *session_id)
                  (long long)(esp_timer_get_time() / 1000LL));
     }
     s_conv.session_active = true;
+    s_conv.downlink_active = false;
     conv_set_state(CONVERSATION_STATE_CONNECTING);
     return ESP_OK;
 }

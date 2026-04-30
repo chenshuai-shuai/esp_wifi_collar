@@ -15,10 +15,13 @@ extern "C" {
  * conversation_client
  *
  *   gRPC client for traini.ConversationService on ESP32-C3.
- *   Transport: HTTP/2 cleartext (h2c) over lwIP sockets (manual framing).
+ *   Transport: HTTP/2 cleartext (h2c) over lwIP sockets. StreamConversation
+ *              uses nghttp2 for SETTINGS/HPACK/DATA/flow control; the already
+ *              stable EndConversation path remains a minimal short-lived h2c
+ *              sender.
  *   Payload:   gRPC length-prefixed Protobuf (nanopb). AudioChunk.audio_data
- *              is base64-encoded (ASCII), byte-identical to the Android
- *              companion's GrpcAudioClient.
+ *              carries raw PCM16 bytes by default, matching the Android app's
+ *              GrpcAudioClient.setEncodeAudioAsBase64(false) startup setting.
  *
  *   This header exposes both:
  *     - low-level lifecycle helpers (start/send_audio/end_session) used by

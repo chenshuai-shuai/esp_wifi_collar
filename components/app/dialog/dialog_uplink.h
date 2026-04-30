@@ -15,6 +15,7 @@ typedef struct {
 
 esp_err_t dialog_uplink_start(void);
 void dialog_uplink_set_active(bool active);
+void dialog_uplink_resume_now(void);
 bool dialog_uplink_is_active(void);
 
 void dialog_uplink_reset_turn(void);

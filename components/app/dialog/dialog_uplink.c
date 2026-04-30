@@ -158,10 +158,10 @@ static void dialog_uplink_task(void *arg)
             }
         }
 
-        if (!conversation_client_stream_writable()) {
+        if (!conversation_client_session_active()) {
             if ((no_stream_log_seq++ % 50U) == 0U) {
                 ESP_LOGI(TAG,
-                         "waiting writable stream, state=%s",
+                         "waiting active session, state=%s",
                          conversation_client_state_str(conversation_client_get_state()));
             }
             filled = 0U;
@@ -169,6 +169,11 @@ static void dialog_uplink_task(void *arg)
         }
 
         if (!conversation_client_uplink_can_accept()) {
+            if ((bp_log++ % 50U) == 0U) {
+                ESP_LOGW(TAG, "uplink queue/backpressure: drop local chunk seq=%llu",
+                         (unsigned long long)(s_stats.seq + 1U));
+            }
+            filled = 0U;
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
@@ -176,7 +181,7 @@ static void dialog_uplink_task(void *arg)
         uint64_t seq_try = s_stats.seq + 1U;
         esp_err_t tx = ESP_FAIL;
         while (s_ul_active) {
-            if (!conversation_client_stream_writable()) {
+            if (!conversation_client_session_active()) {
                 tx = ESP_ERR_INVALID_STATE;
                 break;
             }
@@ -296,6 +301,13 @@ void dialog_uplink_set_active(bool active)
     }
 }
 
+void dialog_uplink_resume_now(void)
+{
+    s_ul_active = true;
+    s_start_holdoff_until_us = 0LL;
+    s_holdoff_logged = false;
+}
+
 bool dialog_uplink_is_active(void)
 {
     return s_ul_active;
@@ -303,8 +315,9 @@ bool dialog_uplink_is_active(void)
 
 void dialog_uplink_reset_turn(void)
 {
-    /* Align with Android GrpcAudioClient talkSeq++ behavior: first packet seq=0. */
-    s_stats.seq = UINT64_MAX;
+    /* Android GrpcAudioClient direct mic paths start talkSeq at 1 and then
+     * send talkSeq++. Keep ESP uplink sequence numbering aligned with that. */
+    s_stats.seq = 0U;
     s_stats.sent_total = 0U;
     s_stats.dropped_total = 0U;
 }

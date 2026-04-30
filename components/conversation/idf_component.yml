@@ -3,4 +3,5 @@
 ## Talks to the cloud traini.ConversationService over HTTP/2 cleartext, matching
 ## the Android companion app's ManagedChannelBuilder.usePlaintext().
 dependencies:
-  livekit/nanopb: "^0.4.9"
+  livekit/nanopb: ^0.4.9
+  espressif/nghttp: ^1.68.1

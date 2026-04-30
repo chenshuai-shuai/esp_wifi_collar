@@ -1,0 +1,149 @@
+ESP-ROM:esp32c3-api1-20210207
+Build:Feb  7 2021
+rst:0x1 (POWERON),boot:0xd (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fcd5820,len:0x1574
+load:0x403cc710,len:0xc30
+load:0x403ce710,len:0x2f58
+entry 0x403cc71a
+I (30) boot: ESP-IDF v5.4-398-g473771bc14-dirty 2nd stage bootloader
+I (30) boot: compile time Apr 24 2026 08:04:02
+I (30) boot: chip revision: v0.4
+I (32) boot: efuse block revision: v1.3
+I (36) boot.esp32c3: SPI Speed      : 80MHz
+I (39) boot.esp32c3: SPI Mode       : DIO
+I (43) boot.esp32c3: SPI Flash Size : 2MB
+I (47) boot: Enabling RNG early entropy source...
+I (51) boot: Partition Table:
+I (54) boot: ## Label            Usage          Type ST Offset   Length
+I (60) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (67) boot:  1 phy_init         RF data          01 01 0000f000 00001000
+I (73) boot:  2 factory          factory app      00 00 00010000 00177000
+I (80) boot: End of partition table
+I (83) esp_image: segment 0: paddr=00010020 vaddr=3c0d0020 size=2be70h (179824) map
+I (119) esp_image: segment 1: paddr=0003be98 vaddr=3fc97a00 size=02ec0h ( 11968) load
+I (122) esp_image: segment 2: paddr=0003ed60 vaddr=40380000 size=012b8h (  4792) load
+I (124) esp_image: segment 3: paddr=00040020 vaddr=42000020 size=c4018h (802840) map
+I (259) esp_image: segment 4: paddr=00104040 vaddr=403812b8 size=16668h ( 91752) load
+I (275) esp_image: segment 5: paddr=0011a6b0 vaddr=50000200 size=0001ch (    28) load
+I (283) boot: Loaded app from partition at offset 0x10000
+I (283) boot: Disabling RNG early entropy source...
+I (294) cpu_start: Unicore app
+I (302) cpu_start: Pro cpu start user code
+I (302) cpu_start: cpu freq: 160000000 Hz
+I (302) app_init: Application information:
+I (302) app_init: Project name:     esp_wifi_collar
+I (307) app_init: App version:      58f1397-dirty
+I (311) app_init: Compile time:     Apr 26 2026 10:52:31
+I (316) app_init: ELF file SHA256:  10837ee5e...
+I (321) app_init: ESP-IDF:          v5.4-398-g473771bc14-dirty
+I (326) efuse_init: Min chip rev:     v0.3
+I (330) efuse_init: Max chip rev:     v1.99 
+I (334) efuse_init: Chip rev:         v0.4
+I (338) heap_init: Initializing. RAM available for dynamic allocation:
+I (344) heap_init: At 3FCBDB50 len 000024B0 (9 KiB): RAM
+I (349) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+I (355) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
+I (361) heap_init: At 5000021C len 00001DCC (7 KiB): RTCRAM
+I (367) spi_flash: detected chip: generic
+I (370) spi_flash: flash io: dio
+W (373) spi_flash: Detected size(4096k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+I (386) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (392) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (398) main_task: Started on CPU0
+I (408) main_task: Calling app_main()
+I (408) main: FW-VER: v0.0.46-nghttp2-stream-uplink (build=46) compiled Apr 26 2026 10:54:40
+I (408) main: Boot start: project=esp_wifi_collar version=58f1397-dirty idf=v5.4-398-g473771bc14-dirty
+I (418) main: Chip info: model=esp32c3 cores=1 revision=4 features=0x12
+I (428) main: Reset reason: power_on (1)
+I (438) wifi_svc: Wi-Fi status: initialized=no
+I (438) conv_cli: status: state=IDLE configured=0 wifi=0 h2c=0 stream=0 session=0 id=- attempts=0 ok=0 fail=0 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=-
+I (458) wifi:wifi driver task: 3fcc6a14, prio:23, stack:6656, core=0
+I (458) wifi:wifi firmware version: 90929ad727
+I (458) wifi:wifi certification version: v7.0
+I (458) wifi:config NVS flash: enabled
+I (468) wifi:config nano formatting: disabled
+I (468) wifi:Init data frame dynamic rx buffer num: 32
+I (478) wifi:Init static rx mgmt buffer num: 5
+I (478) wifi:Init management short buffer num: 32
+I (488) wifi:Init dynamic tx buffer num: 32
+I (488) wifi:Init static tx FG buffer num: 2
+I (488) wifi:Init static rx buffer size: 1600
+I (498) wifi:Init static rx buffer num: 10
+I (498) wifi:Init dynamic rx buffer num: 32
+I (508) wifi_svc: Stored Wi-Fi credentials found, trying STA connect to traini亚太分部
+W (508) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2
+I (558) wifi:mode : sta (ac:a7:04:96:4f:dc)
+I (568) wifi:enable tsf
+I (568) wifi:Set ps type: 2, coexist: 0
+
+I (568) wifi:enable tsf
+I (568) wifi_svc: Wi-Fi power profile: mode=idle ps=MAX_MODEM tx=10.00 dBm
+I (568) wifi_svc: Connecting to Wi-Fi ssid=traini亚太分部 (listen_interval=10 profile=idle)
+I (578) conv_cli: conversation worker started (nghttp2 stream transport)
+I (588) conv_cli: conversation_client armed: traini-grpc-collar-dev-nlb-06c70e7556ee7ab5.elb.us-east-1.amazonaws.com:50051 rate=24000Hz ch=1 bits=16 enc=pcm16 base64=0
+I (598) conv_cli: StreamConversation transport: nghttp2; EndConversation remains minimal h2c
+W (608) i2s_platform: i2s controller 0 has been occupied by i2s_driver
+I (618) app_mgr: Audio mode -> mic: continuous_capture=on boot_chime=done resources=reclaimed
+I (628) app_mgr: console: command reader ready (ESP:CONV_START / ESP:CONV_STOP:<sid>)
+I (628) dlg_ul: uplink task ready: chunk=960 B (20 ms)
+I (638) app_mgr: Mic denoise suppressed while conversation client is configured (reserve RAM for gRPC/manual-h2c)
+I (648) app_mgr: Mic test started: chunk=960B frames=480 frame_bytes=2 rate=24000 channels=1 denoise=speexdsp
+I (668) main: System scaffold started
+I (2068) wifi:new:<11,0>, old:<1,0>, ap:<255,255>, sta:<11,0>, prof:1, snd_ch_cfg:0x0
+I (2068) wifi:state: init -> auth (0xb0)
+I (2068) wifi:state: auth -> assoc (0x0)
+I (2078) wifi:state: assoc -> run (0x10)
+I (2108) wifi:connected with traini亚太分部, aid = 1, channel 11, BW20, bssid = c2:01:0d:12:4e:c4
+I (2108) wifi:security: WPA2-PSK, phy: bgn, rssi: -45
+I (2118) wifi:pm start, type: 2
+
+I (2118) wifi:dp: 1, bi: 102400, li: 10, scale listen interval from 1024000 us to 1024000 us
+I (2128) wifi:set rx beacon pti, rx_bcn_pti: 0, bcn_timeout: 25000, mt_pti: 0, mt_time: 10000
+I (2138) wifi_svc: STA connected to ssid=traini亚太分部
+I (2148) wifi:AP's beacon interval = 102400 us, DTIM period = 1
+I (2388) dlg_ul: drained stale mic PCM: calls=29 bytes=21056 (2s aggregate)
+I (3158) wifi_svc: STA got IP: 192.168.3.10
+I (4438) dlg_ul: drained stale mic PCM: calls=41 bytes=30720 (2s aggregate)
+I (5438) wifi_svc: Wi-Fi status: state=got_ip ready=yes portal=off ssid=traini亚太分部 ip=192.168.3.10 rssi=-44 retries=0
+I (5438) conv_cli: status: state=IDLE configured=1 wifi=1 h2c=0 stream=0 session=0 id=- attempts=0 ok=0 fail=0 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=-
+I (6438) dlg_ul: drained stale mic PCM: calls=40 bytes=30592 (2s aggregate)
+I (8438) dlg_ul: drained stale mic PCM: calls=40 bytes=31552 (2s aggregate)
+I (9318) wifi:<ba-add>idx:0 (ifx:0, c2:01:0d:12:4e:c4), tid:0, ssn:0, winSize:64
+I (9368) wifi_svc: Wi-Fi profile switch requested: realtime
+I (9368) wifi:Set ps type: 1, coexist: 0
+
+I (9378) wifi_svc: Wi-Fi power profile: mode=realtime ps=MIN_MODEM tx=13.00 dBm
+I (9378) conv_cli: conv-state: IDLE -> CONNECTING
+I (9378) conv_cli: conv-state: CONNECTING -> TALKING
+I (9438) dlg_ul: uplink holdoff: wait 4953 ms before first upload
+I (10448) conv_cli: status: state=TALKING configured=1 wifi=1 h2c=0 stream=0 session=1 id=sess-9021 attempts=0 ok=0 fail=0 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=-
+I (10458) dlg_ul: drained stale mic PCM: calls=71 bytes=66048 (2s aggregate)
+I (12458) dlg_ul: drained stale mic PCM: calls=100 bytes=95744 (2s aggregate)
+I (14398) dlg_ul: uplink tx ok: sent_total=1 seq=1 chunk=960
+I (14398) dlg_ul: pcm probe: seq=1 samples=480 mean_abs=451 peak=1203 zero=0.0%
+I (14398) dlg_ul: sent=1 chunks (seq=1)
+I (14428) dlg_ul: mic fill: 640/960 B
+W (14488) dlg_ul: uplink queue/backpressure: drop local chunk seq=6
+E (14648) conv_cli: nghttp2_session_client_new failed: Out of memory heap=13256
+W (14648) conv_cli: h2 close: nghttp2-session-new (sock_errno=0 h2_code=0)
+E (14648) conv_cli: session abort: connect-fail err=0xffffffff -> IDLE
+W (14658) conv_cli: h2 close: connect-fail (sock_errno=0 h2_code=0)
+I (14658) conv_cli: conv-state: TALKING -> IDLE
+I (14668) dlg_ul: mic read pending: ret=0x107 got=0 filled=832 need=128
+W (14668) dlg_ul: session no longer active -> uplink auto stop
+I (14698) dlg_ul: drained stale mic PCM: calls=97 bytes=93184 (2s aggregate)
+I (14958) conv_cli: session abort: auto EndConversation sid='sess-9021' -> OK
+I (15448) conv_cli: status: state=IDLE configured=1 wifi=1 h2c=0 stream=0 session=0 id=sess-9021 attempts=1 ok=0 fail=1 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=connect-fail
+I (16698) dlg_ul: drained stale mic PCM: calls=40 bytes=97280 (2s aggregate)
+I (18698) dlg_ul: drained stale mic PCM: calls=40 bytes=95744 (2s aggregate)
+I (20458) conv_cli: status: state=IDLE configured=1 wifi=1 h2c=0 stream=0 session=0 id=sess-9021 attempts=1 ok=0 fail=1 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=connect-fail
+I (20698) dlg_ul: drained stale mic PCM: calls=40 bytes=96256 (2s aggregate)
+I (22748) dlg_ul: drained stale mic PCM: calls=41 bytes=98304 (2s aggregate)
+I (24798) dlg_ul: drained stale mic PCM: calls=41 bytes=98304 (2s aggregate)
+I (25458) conv_cli: status: state=IDLE configured=1 wifi=1 h2c=0 stream=0 session=0 id=sess-9021 attempts=1 ok=0 fail=1 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=connect-fail
+I (26848) dlg_ul: drained stale mic PCM: calls=41 bytes=98816 (2s aggregate)
+I (28898) dlg_ul: drained stale mic PCM: calls=41 bytes=97792 (2s aggregate)
+I (30458) conv_cli: status: state=IDLE configured=1 wifi=1 h2c=0 stream=0 session=0 id=sess-9021 attempts=1 ok=0 fail=1 sent=0 rx_evt=0 rx_audio=0/0 grpc=0 err=connect-fail
+I (30948) dlg_ul: drained stale mic PCM: calls=41 bytes=98816 (2s aggregate)
