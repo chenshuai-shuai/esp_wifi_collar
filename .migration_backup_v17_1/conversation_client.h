@@ -81,13 +81,6 @@ void conversation_client_set_audio_start_listener(conversation_event_cb_t cb, vo
 void conversation_client_set_session_start_listener(conversation_event_cb_t cb, void *arg);
 void conversation_client_set_error_listener(conversation_error_cb_t cb, void *arg);
 
-/* Monotonic counter of audio_complete (TTS finished) events received from
- * the server. Used by sources (e.g. QEMU virtual-user driver) that need
- * to wait for "TTS done" without stealing the dialog_downlink listener
- * slot. Safe to read from any task. */
-uint32_t conversation_client_audio_complete_count(void);
-int64_t  conversation_client_last_downlink_rx_us(void);
-
 /* ------------- high-level state machine --------------------------- */
 
 conversation_state_t conversation_client_get_state(void);

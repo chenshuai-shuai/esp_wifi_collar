@@ -10,6 +10,8 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
+#include "esp_rom_sys.h"
+
 #include "app/app_manager.h"
 #include "bsp/bsp_board.h"
 #include "kernel/kernel.h"
@@ -18,6 +20,36 @@
 #include "services/service_manager.h"
 
 #include "firmware_version.h"
+
+#if CONFIG_COLLAR_QEMU_OPENETH
+/*
+ * QEMU-only "hard heartbeat" task.
+ *
+ * Goal: distinguish a true system deadlock (no task ever runs) from an
+ * ESP_LOG-printf path deadlock (newlib stdio lock contention) when QEMU
+ * appears to "freeze" mid-session. We use esp_rom_printf which goes
+ * straight to the UART ROM driver and takes NO newlib / FreeRTOS locks,
+ * so this heartbeat survives even if every other task is wedged inside
+ * vfprintf, lwip, nghttp2, etc. Period 2s, very low priority.
+ */
+#include "freertos/queue.h"
+static void hb_task(void *arg)
+{
+    (void)arg;
+    uint32_t i = 0;
+    for (;;) {
+        const int64_t us = esp_timer_get_time();
+        const uint32_t free_heap = (uint32_t)esp_get_free_heap_size();
+        UBaseType_t n_tasks = uxTaskGetNumberOfTasks();
+        esp_rom_printf("[HB %lu] up=%lldms tasks=%u heap=%lu\n",
+                       (unsigned long)i, (long long)(us / 1000LL),
+                       (unsigned)n_tasks, (unsigned long)free_heap);
+        i++;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+#endif
+
 
 
 static const char *TAG = "main";
@@ -107,6 +139,19 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bsp_board_init());
     ESP_ERROR_CHECK(kernel_init());
+
+#if CONFIG_COLLAR_QEMU_OPENETH
+    /*
+     * Start the lock-free heartbeat BEFORE we bring up service_manager /
+     * app_manager. That way, if Wi-Fi/Eth/conv_cli init itself wedges, we
+     * still see [HB N] every 2s and can prove the scheduler is alive.
+     */
+    BaseType_t hb_br = xTaskCreate(hb_task, "hb", 1536, NULL, 1, NULL);
+    if (hb_br != pdPASS) {
+        ESP_LOGW(TAG, "hb_task create failed");
+    }
+#endif
+
     ESP_ERROR_CHECK(service_manager_init());
     ESP_ERROR_CHECK(app_manager_start());
 

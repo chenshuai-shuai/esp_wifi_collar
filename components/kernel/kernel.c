@@ -1,5 +1,6 @@
 #include "kernel/kernel.h"
 
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_err.h"
@@ -14,6 +15,22 @@
 #define KERNEL_RT_TASK_STACK_WORDS     2048
 #define KERNEL_RT_TASK_PRIORITY        22
 #define KERNEL_RT_TASK_CORE            0
+/*
+ * NOTE (QEMU debug 2026-04-26, RESOLVED): an earlier debugging session
+ * observed the vCPU pinning 100% inside esp_timer's timer_task ~12-25 s
+ * into the run (timer_process_alarm -> systimer_hal_set_alarm_target /
+ * esp_timer_impl_get_time, mcause=0x80000003 = machine-software-int with
+ * trap-from-interrupt set). That symptom is a known QEMU-side bug in
+ * `qemu-riscv32 esp_develop_9.0.0_20240606` (esp32c3 systimer/INTC
+ * modeling); it does NOT reproduce on real hardware and does NOT
+ * reproduce with `qemu-riscv32 esp_develop_9.2.2_20260417` or newer.
+ * tools/run_qemu_loop.sh now warns when an old QEMU is in PATH.
+ *
+ * 50 ms tick was tried as a band-aid: it only delayed the wedge by one
+ * session, not eliminate it. We keep the production 10 ms tick so the
+ * QEMU build stays bit-identical with real hardware in this respect.
+ * See docs/QEMU_SINGLE_SESSION_10_ROUNDS_PLAN.md for full notes.
+ */
 #define KERNEL_RT_PERIOD_US            10000
 #define KERNEL_RT_PUBLISH_INTERVAL     100
 

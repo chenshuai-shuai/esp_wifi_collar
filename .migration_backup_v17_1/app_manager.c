@@ -1456,6 +1456,8 @@ static void collar_app_task(void *arg)
          * dialog_uplink module task, not here. */
 
 
+
+
         app_audio_log_status_if_due(now_us);
 
         if (now_us >= next_heartbeat_us) {
@@ -1514,18 +1516,6 @@ esp_err_t app_manager_start(void)
     if (orch_ret != ESP_OK) {
         ESP_LOGW(TAG, "dialog orchestrator start failed: %s", esp_err_to_name(orch_ret));
     }
-
-#if CONFIG_COLLAR_QEMU_OPENETH
-    /* QEMU has no nRF/phone to send ESP:CONV_START / ESP:CONV_STOP, so a
-     * tiny in-firmware "virtual user" task takes that role. Real-hardware
-     * builds (CONFIG_COLLAR_QEMU_OPENETH=n) compile this call to a no-op
-     * via the stub in qemu_user_loop.c. */
-    extern esp_err_t qemu_user_loop_start(void);
-    esp_err_t qu_ret = qemu_user_loop_start();
-    if (qu_ret != ESP_OK) {
-        ESP_LOGW(TAG, "qemu_user_loop_start failed: %s", esp_err_to_name(qu_ret));
-    }
-#endif
 
     s_app_started = true;
 

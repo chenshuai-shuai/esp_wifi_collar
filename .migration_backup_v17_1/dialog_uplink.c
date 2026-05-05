@@ -42,36 +42,6 @@ static uint32_t dialog_calc_chunk_bytes(void)
     return (rate * ch * bps * DIALOG_UL_CHUNK_MS) / 1000U;
 }
 
-#if CONFIG_COLLAR_QEMU_OPENETH
-static uint32_t s_qemu_zero_pcm_lcg = 0x51EED123u;
-
-static int16_t qemu_low_noise_sample(void)
-{
-    s_qemu_zero_pcm_lcg ^= s_qemu_zero_pcm_lcg << 13;
-    s_qemu_zero_pcm_lcg ^= s_qemu_zero_pcm_lcg >> 17;
-    s_qemu_zero_pcm_lcg ^= s_qemu_zero_pcm_lcg << 5;
-    return (int16_t)((int32_t)(s_qemu_zero_pcm_lcg & 0x7FU) - 64);
-}
-
-static void qemu_replace_all_zero_pcm(uint8_t *pcm, size_t len)
-{
-    if (pcm == NULL || len < sizeof(int16_t) || (len % sizeof(int16_t)) != 0U) {
-        return;
-    }
-
-    int16_t *samples = (int16_t *)pcm;
-    const size_t sample_count = len / sizeof(int16_t);
-    for (size_t i = 0; i < sample_count; ++i) {
-        if (samples[i] != 0) {
-            return;
-        }
-    }
-    for (size_t i = 0; i < sample_count; ++i) {
-        samples[i] = qemu_low_noise_sample();
-    }
-}
-#endif
-
 void dialog_uplink_drain_stale(void)
 {
     static uint8_t drain[DIALOG_UL_SCRATCH_MAX_BYTES];
@@ -216,9 +186,6 @@ static void dialog_uplink_task(void *arg)
                 break;
             }
 
-#if CONFIG_COLLAR_QEMU_OPENETH
-            qemu_replace_all_zero_pcm(scratch, chunk);
-#endif
             tx = conversation_client_send_audio(scratch, chunk, seq_try);
             if (tx == ESP_OK) {
                 s_stats.seq = seq_try;

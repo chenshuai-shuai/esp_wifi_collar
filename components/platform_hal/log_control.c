@@ -46,6 +46,12 @@ void log_control_apply(void)
     set_level("app_mgr",     ESP_LOG_INFO);
     set_level("conv_cli",    ESP_LOG_INFO);
     set_level("dlg_ul",      ESP_LOG_INFO);   /* uplink PCM probe / pacing diag */
+    set_level("dlg_orch",    ESP_LOG_INFO);   /* dialog orchestrator: CONV_START/STOP, end-rpc */
+    set_level("dlg_sess",    ESP_LOG_INFO);
+    set_level("dlg_conn",    ESP_LOG_INFO);
+    set_level("dlg_dl",      ESP_LOG_INFO);
+    set_level("dlg_pb",      ESP_LOG_INFO);
+    set_level("qemu_user",   ESP_LOG_INFO);   /* QEMU virtual user driving the loop */
     /*
      * Diagnostic helper: if conv_cli keeps showing wifi=0 we need to
      * see the wifi_svc state transitions (ssid scanning, auth, got ip,
@@ -57,8 +63,14 @@ void log_control_apply(void)
     /* Keep these at WARN so they still surface real failures but don't
      * spam periodic status every second. */
 
-    set_level("cloud_svc",   ESP_LOG_WARN);
-    set_level("service_mgr", ESP_LOG_WARN);
+    /*
+     * Promoted to INFO under the QEMU bring-up: we want to see Wi-Fi state
+     * transitions (service_mgr) and outbound TCP probe results (cloud_svc)
+     * to debug the OpenETH path. Real-hardware behaviour stays unchanged
+     * because these tags emit the same INFO lines on real Wi-Fi too.
+     */
+    set_level("cloud_svc",   ESP_LOG_INFO);
+    set_level("service_mgr", ESP_LOG_INFO);
     set_level("kernel",      ESP_LOG_WARN);
     set_level("hal",         ESP_LOG_WARN);
     set_level("bsp",         ESP_LOG_WARN);

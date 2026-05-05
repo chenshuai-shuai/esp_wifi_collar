@@ -29,6 +29,28 @@ menu "Collar Configuration"
             Keep the bootstrap log enabled while bringing up the ESP32-C3 real-time
             dialogue controller. Disable it later if you want quieter production logs.
 
+    config COLLAR_QEMU_BYPASS_ADC2_CALIBRATION
+        bool "QEMU only: bypass ESP32-C3 ADC2 startup calibration"
+        default n
+        help
+            Keep disabled on real hardware. Espressif QEMU for ESP32-C3 does not
+            currently raise the ADC2 one-shot calibration event used by the IDF
+            startup constructor, so the firmware can hang before app_main().
+            Enable only in a dedicated QEMU sdkconfig to reach application code.
+
+    config COLLAR_QEMU_OPENETH
+        bool "QEMU only: replace Wi-Fi service with OpenCores Ethernet (open_eth)"
+        default n
+        help
+            Espressif QEMU for ESP32-C3 does not emulate RF/PHY, so the firmware
+            cannot associate to a real Wi-Fi AP under QEMU. The QEMU machine
+            does expose an OpenCores 10/100 Ethernet NIC via "-nic user,model=open_eth".
+            Enable this only in sdkconfig.qemu: it swaps the Wi-Fi service for an
+            OpenETH-based netif and keeps publishing the same kernel Wi-Fi
+            state messages so the conversation/dialog stack works unchanged.
+            Real hardware builds must keep this disabled.
+
+
     config COLLAR_CLOUD_PROBE_ENABLE
         bool "Enable cloud reachability probe"
         default y
@@ -64,7 +86,7 @@ menu "Collar Configuration"
         help
             TCP connect timeout used by the cloud reachability probe.
 
-    menu "Conversation gRPC client (manual h2c + nanopb)"
+    menu "Conversation gRPC client (nghttp2 stream + nanopb)"
 
         config COLLAR_CONV_HOST
             string "Conversation gRPC server host"
@@ -91,13 +113,13 @@ menu "Collar Configuration"
                 Android app's GrpcAudioClient.setUserId() value.
 
         config COLLAR_CONV_AUDIO_BASE64
-            bool "Encode AudioChunk.audio_data as base64 string (match Android)"
-            default y
+            bool "Encode AudioChunk.audio_data as base64 string"
+            default n
             help
-                The Android companion encodes the raw PCM bytes as a base64
-                ASCII string and puts that into the bytes field. Keep this
-                enabled so the server sees identical payloads from both
-                clients.
+                Keep disabled to match the Android app startup configuration
+                (GrpcAudioClient.setEncodeAudioAsBase64(false)): audio_data
+                carries raw PCM16 bytes directly. Enable only for legacy
+                server experiments that expect base64 ASCII in the bytes field.
 
 
         config COLLAR_CONV_RETRY_INTERVAL_SEC

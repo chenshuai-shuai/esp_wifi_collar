@@ -1,6 +1,10 @@
+#include "sdkconfig.h"
 #include "services/wifi_service.h"
 
+#if !CONFIG_COLLAR_QEMU_OPENETH
+
 #include <errno.h>
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1062,3 +1066,6 @@ esp_err_t wifi_service_start(void)
 
     return ESP_OK;
 }
+
+#endif /* !CONFIG_COLLAR_QEMU_OPENETH */
+
