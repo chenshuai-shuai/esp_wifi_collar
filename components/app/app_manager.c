@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "app/app_manager.h"
+#include "app/audio_handoff.h"
 #include "app/dialog_orchestrator.h"
 
 #include "freertos/FreeRTOS.h"
@@ -49,6 +50,7 @@
 #define APP_UPLINK_BACKPRESSURE_RETRY_MS  5U
 #define APP_UPLINK_BACKPRESSURE_MAX_RETRY 1U
 #define APP_CONV_UPLINK_CHUNK_MS          40U
+#define APP_AUDIO_MIC_MODE_INIT_SPEAKER   0
 
 #ifdef CONFIG_COLLAR_MICROPHONE_DENOISE_VAD_ENABLE
 #define APP_MIC_DENOISE_VAD_ENABLED true
@@ -63,6 +65,7 @@ static StackType_t s_app_stack[APP_MANAGER_STACK_WORDS];
 static StaticTask_t s_console_tcb;
 static StackType_t s_console_stack[APP_CONSOLE_STACK_WORDS];
 static bool s_app_started;
+static volatile bool s_console_uart_ready;
 
 typedef enum {
 
@@ -876,9 +879,13 @@ static void app_audio_log_status_if_due(int64_t now_us)
 
 static void app_audio_switch_to_mic(void)
 {
+    if (!audio_handoff_is_esp_owner()) {
+        return;
+    }
+
+#if APP_AUDIO_MIC_MODE_INIT_SPEAKER
     /* Keep the speaker powered up during mic mode so that server
-     * downlink audio can be rendered alongside uplink capture
-     * (full-duplex conversation driven via UART console). */
+     * downlink audio can be rendered alongside uplink capture. */
     if (!bsp_speaker_is_ready()) {
         esp_err_t spk_ret = bsp_speaker_init();
         if (spk_ret != ESP_OK) {
@@ -886,6 +893,11 @@ static void app_audio_switch_to_mic(void)
                      esp_err_to_name(spk_ret));
         }
     }
+#else
+    if (!bsp_speaker_is_ready()) {
+        ESP_LOGW(TAG, "Speaker init skipped in mic mode: handoff mic-only bring-up");
+    }
+#endif
 
 #if CONFIG_COLLAR_SPEAKER_TEST_ENABLE
     app_speaker_test_reset();
@@ -917,6 +929,10 @@ static void app_audio_switch_to_mic(void)
 #if CONFIG_COLLAR_SPEAKER_TEST_ENABLE
 static void app_audio_switch_to_boot_chime(void)
 {
+    if (!audio_handoff_is_esp_owner()) {
+        return;
+    }
+
 #if CONFIG_COLLAR_MICROPHONE_STREAM_ENABLE
     app_mic_stream_deinit();
 #endif
@@ -946,13 +962,16 @@ static void app_audio_mode_tick(int64_t now_us)
 {
     (void)now_us;
 
+    if (!audio_handoff_is_esp_owner()) {
+        s_audio_runtime.initialized = false;
+        s_audio_runtime.boot_chime_done = false;
+        s_audio_runtime.mode = APP_AUDIO_MODE_MIC;
+        return;
+    }
+
     if (!s_audio_runtime.initialized) {
         s_audio_runtime.initialized = true;
-#if CONFIG_COLLAR_SPEAKER_TEST_ENABLE
-        app_audio_switch_to_boot_chime();
-#else
         app_audio_switch_to_mic();
-#endif
         return;
     }
 
@@ -1389,7 +1408,11 @@ static void app_console_handle_stop(const char *session_id)
 
 static void app_console_process_line(char *line)
 {
-    dialog_orchestrator_process_line(line);
+    if (audio_handoff_process_line(line)) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "console: ignored non-handoff UART line");
 }
 
 static void app_console_task(void *arg)
@@ -1405,7 +1428,8 @@ static void app_console_task(void *arg)
 
     char line[96];
     size_t pos = 0U;
-    ESP_LOGI(TAG, "console: command reader ready (ESP:CONV_START / ESP:CONV_STOP:<sid>)");
+    ESP_LOGI(TAG, "console: command reader ready (nRF handoff protocol)");
+    s_console_uart_ready = true;
     for (;;) {
         uint8_t ch = 0;
         int r = uart_read_bytes(port, &ch, 1, pdMS_TO_TICKS(100));
@@ -1438,6 +1462,9 @@ static void collar_app_task(void *arg)
     for (;;) {
         const int64_t now_us = esp_timer_get_time();
         app_audio_mode_tick(now_us);
+        if (audio_handoff_is_esp_owner()) {
+            dialog_orchestrator_auto_tick(now_us);
+        }
 
 
 #if CONFIG_COLLAR_SPEAKER_TEST_ENABLE
@@ -1447,6 +1474,7 @@ static void collar_app_task(void *arg)
 #endif
 #if CONFIG_COLLAR_MICROPHONE_TEST_ENABLE
         if (s_audio_runtime.mode == APP_AUDIO_MODE_MIC &&
+            audio_handoff_is_esp_owner() &&
             conversation_client_get_state() == CONVERSATION_STATE_IDLE &&
             !dialog_orchestrator_is_active()) {
             app_mic_test_tick();
@@ -1487,6 +1515,11 @@ esp_err_t app_manager_start(void)
         return ESP_OK;
     }
 
+    esp_err_t handoff_ret = audio_handoff_init();
+    if (handoff_ret != ESP_OK) {
+        return handoff_ret;
+    }
+
     TaskHandle_t task_handle = xTaskCreateStaticPinnedToCore(
         collar_app_task,
         "collar_app",
@@ -1501,13 +1534,20 @@ esp_err_t app_manager_start(void)
     if (task_handle == NULL) {
         return ESP_FAIL;
     }
-    /* Console command reader (ESP:CONV_START / ESP:CONV_STOP:<sid>) */
+    /* UART command reader for nRF handoff protocol. */
     TaskHandle_t console_th = xTaskCreateStatic(
         app_console_task, "app_console",
         APP_CONSOLE_STACK_WORDS, NULL, 3,
         s_console_stack, &s_console_tcb);
     if (console_th == NULL) {
         ESP_LOGW(TAG, "console task create failed");
+    } else {
+        for (uint32_t wait_ms = 0; wait_ms < 1000U && !s_console_uart_ready; wait_ms += 10U) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (!s_console_uart_ready) {
+            ESP_LOGW(TAG, "console UART reader did not report ready before handoff announce");
+        }
     }
 
     esp_err_t orch_ret = dialog_orchestrator_start();
@@ -1516,7 +1556,7 @@ esp_err_t app_manager_start(void)
     }
 
 #if CONFIG_COLLAR_QEMU_OPENETH
-    /* QEMU has no nRF/phone to send ESP:CONV_START / ESP:CONV_STOP, so a
+    /* QEMU has no nRF/phone to drive the BLE/audio handoff, so a
      * tiny in-firmware "virtual user" task takes that role. Real-hardware
      * builds (CONFIG_COLLAR_QEMU_OPENETH=n) compile this call to a no-op
      * via the stub in qemu_user_loop.c. */
@@ -1531,5 +1571,12 @@ esp_err_t app_manager_start(void)
 
 
     kernel_trace_boot("app manager started");
+    if (s_console_uart_ready) {
+        esp_err_t handoff_uart_ret = audio_handoff_uart_ready();
+        if (handoff_uart_ret != ESP_OK) {
+            ESP_LOGW(TAG, "audio handoff UART ready announce failed: %s",
+                     esp_err_to_name(handoff_uart_ret));
+        }
+    }
     return ESP_OK;
 }

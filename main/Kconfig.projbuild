@@ -146,10 +146,9 @@ menu "Collar Configuration"
             string "Uplink AudioFormat encoding string"
             default "pcm16"
 
-        # Conversation sessions are driven exclusively via the UART console
-        # commands "ESP:CONV_START" / "ESP:CONV_STOP:<sid>" issued by the
-        # nRF companion (see ESP_NRF_SYSTEM_CONTRACT.md). No auto-start,
-        # demo loop, or self-test driver is compiled into the firmware.
+        # Conversation sessions are driven by the nRF audio handoff owner:
+        # once ESP32 owns the shared mic/speaker path and Wi-Fi is ready,
+        # the firmware starts the cloud conversation automatically.
 
     endmenu
 

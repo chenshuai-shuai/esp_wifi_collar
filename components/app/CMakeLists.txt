@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "app_manager.c"
+         "audio_handoff/audio_handoff.c"
          "dialog/dialog_connection.c"
          "dialog/dialog_session.c"
          "dialog/dialog_uplink.c"

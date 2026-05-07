@@ -342,8 +342,10 @@ static const char *TAG = "mic";
 #if CONFIG_COLLAR_MICROPHONE_ENABLE
 #define BSP_MIC_SPI_HOST                SPI2_HOST
 #define BSP_MIC_RAW_BYTES               2048U
-#define BSP_MIC_STREAM_BUFFER_MS        750U
+#define BSP_MIC_STREAM_BUFFER_MS        200U
 #define BSP_MIC_STREAM_BUFFER_MAX_BYTES (48U * 1024U)
+#define BSP_MIC_I2S_DMA_DESC_NUM        3U
+#define BSP_MIC_I2S_DMA_FRAME_NUM       128U
 #define BSP_MIC_MIN_DECIMATION          64U
 #define BSP_MIC_PCM_SAMPLES_PER_BLOCK   ((BSP_MIC_RAW_BYTES * 8U) / BSP_MIC_MIN_DECIMATION)
 #define BSP_MIC_I2S_SLOT_BITS           16U
@@ -425,6 +427,18 @@ typedef struct {
 
 static microphone_state_t s_mic;
 static bool s_microphone_ready;
+
+static void mic_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "heap[%s]: internal=%u largest_internal=%u dma=%u largest_dma=%u min_free=%u",
+             stage,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             (unsigned int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
 
 static TickType_t mic_delay_ticks(uint32_t ms)
 {
@@ -1063,6 +1077,7 @@ esp_err_t bsp_microphone_init(void)
         return ESP_OK;
     }
 
+    mic_log_heap("init-begin");
     memset(&s_mic, 0, sizeof(s_mic));
     s_mic.sample_rate_hz = (uint32_t)CONFIG_COLLAR_MICROPHONE_SAMPLE_RATE;
 #if CONFIG_COLLAR_MICROPHONE_STEREO
@@ -1090,13 +1105,16 @@ esp_err_t bsp_microphone_init(void)
 
 #if !CONFIG_COLLAR_MICROPHONE_STEREO
     i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    rx_chan_cfg.dma_desc_num = 6;
-    rx_chan_cfg.dma_frame_num = 511;
+    rx_chan_cfg.dma_desc_num = BSP_MIC_I2S_DMA_DESC_NUM;
+    rx_chan_cfg.dma_frame_num = BSP_MIC_I2S_DMA_FRAME_NUM;
+    mic_log_heap("before-i2s-new-channel");
     esp_err_t ret = i2s_new_channel(&rx_chan_cfg, NULL, &s_mic.i2s_rx);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to allocate I2S raw RX channel: %s", esp_err_to_name(ret));
+        mic_log_heap("i2s-new-channel-failed");
         return ret;
     }
+    mic_log_heap("after-i2s-new-channel");
     ESP_LOGI(TAG,
              "Mic I2S RX config: port=%d dma_desc=%u dma_frame=%u clk_gpio=%d din_gpio=%d",
              I2S_NUM_0,
@@ -1108,34 +1126,48 @@ esp_err_t bsp_microphone_init(void)
 
     const uint32_t capture_lane_count = s_mic.channels > 1U ? BSP_MIC_CAPTURE_LANE_COUNT : 1U;
 #if CONFIG_COLLAR_MICROPHONE_STEREO
+    mic_log_heap("before-dma-tx-buffer");
     s_mic.tx_dummy = heap_caps_calloc(1, BSP_MIC_RAW_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     if (s_mic.tx_dummy == NULL) {
         ESP_LOGE(TAG, "Failed to allocate DMA TX buffer (%uB)", (unsigned int)BSP_MIC_RAW_BYTES);
+        mic_log_heap("dma-tx-buffer-failed");
         mic_cleanup_on_error();
         return ESP_ERR_NO_MEM;
     }
+    mic_log_heap("after-dma-tx-buffer");
 #endif
 
     for (uint32_t i = 0; i < capture_lane_count; ++i) {
+        mic_log_heap("before-dma-rx-buffer");
         s_mic.rx_dma[i] = heap_caps_calloc(1, BSP_MIC_RAW_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
         if (s_mic.rx_dma[i] == NULL) {
             ESP_LOGE(TAG, "Failed to allocate DMA RX buffer for lane %u (%uB)",
                      (unsigned int)i, (unsigned int)BSP_MIC_RAW_BYTES);
+            mic_log_heap("dma-rx-buffer-failed");
             mic_cleanup_on_error();
             return ESP_ERR_NO_MEM;
         }
+        mic_log_heap("after-dma-rx-buffer");
     }
 
     const size_t pcm_stream_bytes = mic_stream_buffer_bytes(s_mic.sample_rate_hz, s_mic.channels);
+    ESP_LOGI(TAG, "PCM stream buffer target: %uB (%u ms, %u ch @ %u Hz)",
+             (unsigned int)pcm_stream_bytes,
+             (unsigned int)BSP_MIC_STREAM_BUFFER_MS,
+             (unsigned int)s_mic.channels,
+             (unsigned int)s_mic.sample_rate_hz);
+    mic_log_heap("before-pcm-stream");
     s_mic.pcm_stream = xStreamBufferCreate(pcm_stream_bytes, sizeof(int16_t));
     if (s_mic.pcm_stream == NULL) {
         ESP_LOGE(TAG, "Failed to allocate PCM stream buffer (%uB for %u ch @ %u Hz)",
                  (unsigned int)pcm_stream_bytes,
                  (unsigned int)s_mic.channels,
                  (unsigned int)s_mic.sample_rate_hz);
+        mic_log_heap("pcm-stream-failed");
         mic_cleanup_on_error();
         return ESP_ERR_NO_MEM;
     }
+    mic_log_heap("after-pcm-stream");
 
 #if CONFIG_COLLAR_MICROPHONE_STEREO
     spi_bus_config_t bus_cfg = {
@@ -1150,13 +1182,16 @@ esp_err_t bsp_microphone_init(void)
         .data7_io_num = -1,
         .max_transfer_sz = BSP_MIC_RAW_BYTES,
     };
+    mic_log_heap("before-spi-bus");
 
     esp_err_t ret = spi_bus_initialize(BSP_MIC_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SPI bus for microphone: %s", esp_err_to_name(ret));
+        mic_log_heap("spi-bus-failed");
         mic_cleanup_on_error();
         return ret;
     }
+    mic_log_heap("after-spi-bus");
 
     const int spi_mode[BSP_MIC_CAPTURE_LANE_COUNT] = {0, 0};
 #else
@@ -1214,18 +1249,24 @@ esp_err_t bsp_microphone_init(void)
             },
         },
     };
+    mic_log_heap("before-i2s-std-init");
     ret = i2s_channel_init_std_mode(s_mic.i2s_rx, &rx_std_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize I2S raw RX mode: %s", esp_err_to_name(ret));
+        mic_log_heap("i2s-std-init-failed");
         mic_cleanup_on_error();
         return ret;
     }
+    mic_log_heap("after-i2s-std-init");
+    mic_log_heap("before-i2s-enable");
     ret = i2s_channel_enable(s_mic.i2s_rx);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to enable I2S raw RX mode: %s", esp_err_to_name(ret));
+        mic_log_heap("i2s-enable-failed");
         mic_cleanup_on_error();
         return ret;
     }
+    mic_log_heap("after-i2s-enable");
     ESP_LOGI(TAG,
              "Mic I2S STD mode: sample_rate=%uHz slot_bits=%u slots=%u ws=%d bclk=%d din=%d",
              (unsigned int)i2s_raw_rate_hz,
@@ -1237,16 +1278,19 @@ esp_err_t bsp_microphone_init(void)
 #endif
 
     s_mic.task_running = true;
+    mic_log_heap("before-task-create");
     ret = xTaskCreate(
         mic_capture_task, "mic_capture", BSP_MIC_TASK_STACK_WORDS, NULL,
         BSP_MIC_TASK_PRIORITY, &s_mic.task);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create mic_capture task (stack=%u)",
                  (unsigned int)BSP_MIC_TASK_STACK_WORDS);
+        mic_log_heap("task-create-failed");
         s_mic.task_running = false;
         mic_cleanup_on_error();
         return ESP_ERR_NO_MEM;
     }
+    mic_log_heap("after-task-create");
 
     s_microphone_ready = true;
     if (s_mic.channels > 1U) {

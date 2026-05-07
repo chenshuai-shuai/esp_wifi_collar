@@ -6,6 +6,8 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#include "bsp/microphone_input.h"
+#include "bsp/speaker_output.h"
 #include "conversation/conversation_client.h"
 
 #include "dialog_playback.h"
@@ -14,6 +16,58 @@
 static const char *TAG = "dlg_dl";
 
 static bool s_started;
+
+#if !CONFIG_COLLAR_QEMU_OPENETH
+static esp_err_t dialog_downlink_enter_playback_mode(const char *reason)
+{
+    if (dialog_uplink_is_active()) {
+        dialog_uplink_set_active(false);
+        ESP_LOGI(TAG, "%s: uplink stopped", reason);
+    }
+
+    if (bsp_microphone_is_ready()) {
+        ESP_LOGI(TAG, "%s: microphone stop before speaker playback", reason);
+        bsp_microphone_deinit();
+    }
+
+    if (!bsp_speaker_is_ready()) {
+        ESP_LOGI(TAG, "%s: speaker init begin", reason);
+        esp_err_t ret = bsp_speaker_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "%s: speaker init failed: %s", reason, esp_err_to_name(ret));
+            return ret;
+        }
+        ESP_LOGI(TAG, "%s: speaker init done", reason);
+    }
+
+    return ESP_OK;
+}
+
+static void dialog_downlink_enter_capture_mode(const char *reason)
+{
+    if (bsp_speaker_is_ready()) {
+        ESP_LOGI(TAG, "%s: speaker stop after playback", reason);
+        bsp_speaker_deinit();
+    }
+
+    if (!bsp_microphone_is_ready()) {
+        ESP_LOGI(TAG, "%s: microphone restart begin", reason);
+        esp_err_t ret = bsp_microphone_init();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "%s: microphone restart failed: %s", reason, esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "%s: microphone restart done", reason);
+    }
+
+    if (conversation_client_session_active()) {
+        dialog_uplink_resume_now();
+        ESP_LOGI(TAG, "%s: uplink resumed", reason);
+    } else {
+        ESP_LOGI(TAG, "%s: session inactive, uplink remains stopped", reason);
+    }
+}
+#endif /* !CONFIG_COLLAR_QEMU_OPENETH */
 
 #if CONFIG_COLLAR_QEMU_OPENETH
 /*
@@ -87,6 +141,13 @@ static void dialog_downlink_on_audio_output(const uint8_t *pcm,
     (void)s_qemu_audio_in_turn;
 #else
     (void)seq;
+    if (!bsp_speaker_is_ready()) {
+        esp_err_t ret = dialog_downlink_enter_playback_mode("audio_output");
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "audio_output dropped: speaker unavailable");
+            return;
+        }
+    }
     (void)dialog_playback_write(pcm, len);
 #endif
 }
@@ -102,12 +163,7 @@ static void dialog_downlink_on_audio_complete(void *arg)
     s_qemu_seen_audio_output_in_turn = false;
     ESP_LOGI(TAG, "audio_complete (qemu): downlink dropped, awaiting next-turn audio_output");
 #else
-    if (conversation_client_session_active()) {
-        dialog_uplink_resume_now();
-        ESP_LOGI(TAG, "audio_complete: discarded downlink, uplink resumed");
-    } else {
-        ESP_LOGI(TAG, "audio_complete: discarded downlink, session inactive");
-    }
+    dialog_downlink_enter_capture_mode("audio_complete");
 #endif
 }
 
@@ -126,12 +182,7 @@ static void dialog_downlink_on_audio_start(void *arg)
         }
     }
 #else
-    if (dialog_uplink_is_active()) {
-        dialog_uplink_set_active(false);
-        ESP_LOGI(TAG, "audio_start: uplink stopped, downlink discard mode");
-    } else {
-        ESP_LOGI(TAG, "audio_start: downlink discard mode");
-    }
+    (void)dialog_downlink_enter_playback_mode("audio_start");
 #endif
 }
 

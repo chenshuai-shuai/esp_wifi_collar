@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -70,6 +71,20 @@
 #ifndef CONV_VERBOSE_UPLINK_TRACE
 #  define CONV_VERBOSE_UPLINK_TRACE 0
 #endif
+
+static void conv_log_heap(const char *stage)
+{
+    ESP_LOGW(TAG,
+             "heap[%s]: free_8bit=%u largest_8bit=%u internal=%u largest_internal=%u dma=%u largest_dma=%u min_free=%u",
+             stage,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             (unsigned int)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             (unsigned int)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
 
 
 #if CONV_VERBOSE_TRACE
@@ -1102,12 +1117,15 @@ static esp_err_t h2_connect_if_needed(void)
     }
 
     s_conv.connect_attempts++;
+    conv_log_heap("connect-begin");
     int sock = tcp_connect_blocking(CONFIG_COLLAR_CONV_HOST, (uint16_t)CONFIG_COLLAR_CONV_PORT, 5000);
     if (sock < 0) {
         s_conv.connect_failures++;
         conv_set_error("tcp connect failed");
+        conv_log_heap("tcp-connect-failed");
         return ESP_FAIL;
     }
+    conv_log_heap("after-tcp-connect");
 
     s_h2.sock = sock;
     s_h2.connected = true;
@@ -1119,14 +1137,17 @@ static esp_err_t h2_connect_if_needed(void)
     s_h2.headers_sent = false;
     s_h2.data_pending = false;
 
+    conv_log_heap("before-nghttp2-callbacks-new");
     int rv = nghttp2_session_callbacks_new(&s_h2.callbacks);
     if (rv != 0) {
         ESP_LOGE(TAG, "nghttp2 callbacks alloc failed: %s heap=%lu",
                  nghttp2_strerror(rv), (unsigned long)esp_get_free_heap_size());
+        conv_log_heap("nghttp2-callbacks-new-failed");
         h2_close("nghttp2-cb-alloc");
         s_conv.connect_failures++;
         return ESP_ERR_NO_MEM;
     }
+    conv_log_heap("after-nghttp2-callbacks-new");
     nghttp2_session_callbacks_set_send_callback(s_h2.callbacks, ng_send_cb);
     nghttp2_session_callbacks_set_recv_callback(s_h2.callbacks, ng_recv_cb);
     nghttp2_session_callbacks_set_on_frame_recv_callback(s_h2.callbacks, ng_on_frame_recv_cb);
@@ -1134,14 +1155,17 @@ static esp_err_t h2_connect_if_needed(void)
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(s_h2.callbacks, ng_on_data_chunk_recv_cb);
     nghttp2_session_callbacks_set_error_callback(s_h2.callbacks, ng_error_cb);
 
+    conv_log_heap("before-nghttp2-session-new");
     rv = nghttp2_session_client_new(&s_h2.session, s_h2.callbacks, NULL);
     if (rv != 0) {
         ESP_LOGE(TAG, "nghttp2_session_client_new failed: %s heap=%lu",
                  nghttp2_strerror(rv), (unsigned long)esp_get_free_heap_size());
+        conv_log_heap("nghttp2-session-new-failed");
         h2_close("nghttp2-session-new");
         s_conv.connect_failures++;
         return ESP_ERR_NO_MEM;
     }
+    conv_log_heap("after-nghttp2-session-new");
 
     /* Advertise a generous local INITIAL_WINDOW_SIZE so the server isn't
      * stream-flow-control-limited on the downlink. The default 65535 has
